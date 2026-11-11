@@ -124,6 +124,29 @@ function resolveBin(bin) {
   });
 }
 
+/** Whether this claude accepts an optional flag. Probed once per executable and flag: claude rejects an unknown option before
+ *  anything runs (no API call), so older versions that lack a flag still work, only without what the flag adds. */
+const flagProbes = new Map();
+function claudeAccepts(resolved, flag) {
+  const key = `${resolved}\0${flag}`;
+  if (!flagProbes.has(key)) flagProbes.set(key, new Promise(resolve => {
+    let out = '', child;
+    const done = ok => { clearTimeout(timer); resolve(ok); };
+    const timer = setTimeout(() => { try { child?.kill(); } catch {} done(true); }, 15000);
+    try { child = spawnBin(resolved, ['-p', flag], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }); } catch { return done(true); }
+    child.stdout.on('data', d => { out += d; });
+    child.stderr.on('data', d => { out += d; });
+    child.on('error', () => done(true));
+    child.on('close', () => {
+      const ok = !/unknown option/i.test(out);
+      if (!ok) console.warn(`Este Claude Code não aceita ${flag}: a execução segue sem ele.`);
+      done(ok);
+    });
+    child.stdin.end();
+  }));
+  return flagProbes.get(key);
+}
+
 /** Expand Windows 8.3 short names (C:\USER~1) that Claude Code's path safety checks reject. */
 const longPath = p => { try { return fs.realpathSync.native(p); } catch { return p; } };
 
@@ -331,7 +354,7 @@ async function startRun(body) {
     await fsp.writeFile(agentsFile, JSON.stringify(opts.agents), 'utf8');
     args.push('--agents', agentsFile);
   }
-  if (opts.forwardSubagents) args.push('--forward-subagent-text');
+  if (opts.forwardSubagents && await claudeAccepts(resolved, '--forward-subagent-text')) args.push('--forward-subagent-text');
   if (opts.model) args.push('--model', opts.model);
   if (opts.permissionMode) args.push('--permission-mode', opts.permissionMode);
   if (opts.effort) args.push('--effort', opts.effort);

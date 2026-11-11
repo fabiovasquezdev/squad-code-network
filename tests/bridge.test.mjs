@@ -624,3 +624,19 @@ test('repos endpoints reject bad project folders, bad repository paths and a mis
   const shallow = await api('/api/repos/index', { method: 'POST', body: JSON.stringify({ project: 'op-053-repos', path: '/' }) });
   assert.equal(shallow.status, 400);
 });
+
+test('a Claude Code that rejects --forward-subagent-text still runs, just without the flag', async () => {
+  const old = path.join(ROOT, 'tests', 'fake-claude-old.mjs');
+  const agents = { argus: { description: 'ARGUS, arquiteto.', prompt: 'Você é o ARGUS.', tools: ['Read'] } };
+  const res = await api('/api/runs', { method: 'POST', body: JSON.stringify({ prompt: 'implement', options: { cwd: workdir, claudePath: old, agents, forwardSubagents: true, tools: ['Read', 'Agent'] } }) });
+  assert.equal(res.status, 201, await res.clone().text());
+  const { runId, args } = await res.json();
+  assert.ok(args.includes('--agents'), 'colleagues are still passed');
+  assert.ok(!args.includes('--forward-subagent-text'), 'the unsupported flag is left out');
+  const events = await collect(runId);
+  assert.equal(events.at(-1).status, 'done');
+  // The probe is cached: a second run does not fail either.
+  const again = await (await api('/api/runs', { method: 'POST', body: JSON.stringify({ prompt: 'x', options: { cwd: workdir, claudePath: old, agents, forwardSubagents: true } }) })).json();
+  assert.ok(!again.args.includes('--forward-subagent-text'));
+  assert.equal((await collect(again.runId)).at(-1).status, 'done');
+});
