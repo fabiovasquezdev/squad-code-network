@@ -306,7 +306,8 @@ async function startRun(body) {
   if (opts.projectRun) await ensureProjectRepo(opts.cwd);
 
   const id = crypto.randomUUID();
-  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-prompts', 'none'];
+  // No --permission-prompts: Claude Code 2.1.153 rejects it ("unknown option"). In -p mode a prompt nobody can answer is denied anyway.
+  const args = ['-p', '--output-format', 'stream-json', '--verbose'];
   let sysFile = null, settingsFile = null, agentsFile = null;
   // OS temp cleanup can remove the (usually empty) folder while the bridge keeps running.
   if (systemPrompt.trim() || opts.projectRun || opts.agents) await fsp.mkdir(TMP_DIR, { recursive: true });
