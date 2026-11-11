@@ -160,6 +160,9 @@ function projectDir(name) {
 
 const cmdQuote = s => /^[A-Za-z0-9_\-.:\\/=@,+]+$/.test(s) ? s : `"${String(s).replace(/"/g, '""')}"`;
 
+// Repositories of a project + its GitNexus scope (repos.js): POST /api/repos/sync and /api/repos/index.
+const repoTools = require('./repos.js').createRepoTools({ appRoot: ROOT, projectDir, resolveBin, spawnBin });
+
 /** Spawn an executable; .cmd/.bat on Windows must go through cmd.exe. Args are simple tokens only. */
 function spawnBin(resolved, args, opts) {
   if (IS_WIN && /\.(cmd|bat)$/i.test(resolved)) {
@@ -257,7 +260,7 @@ function validateRunOptions(o = {}) {
   // Optional hard restriction of the built-in tool set (maps to --tools). null = Claude Code defaults.
   out.tools = Array.isArray(o.tools) ? tools(o.tools) : null;
   if (out.tools) for (const t of out.tools) if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(t)) throw new Error(`Ferramenta inválida: ${t}`);
-  out.addDirs = (Array.isArray(o.addDirs) ? o.addDirs : []).map(String).map(s => s.trim()).filter(Boolean).slice(0, 10).map(d => path.resolve(d));
+  out.addDirs = (Array.isArray(o.addDirs) ? o.addDirs : []).map(String).map(s => s.trim()).filter(Boolean).slice(0, 20).map(d => path.resolve(d));
   out.addDirs = out.addDirs.map(d => fs.existsSync(d) ? longPath(d) : d);
   for (const d of out.addDirs) if (!fs.existsSync(d)) throw new Error(`Diretório adicional inexistente: ${d}`);
   // Streams text deltas as `stream_event` lines (chat bubbles grow while the model writes).
@@ -512,6 +515,15 @@ async function handle(req, res) {
       const n = Number(body.concurrency);
       if (Number.isInteger(n) && n >= 1 && n <= 8) maxConcurrent = n;
       return json(res, 200, { ok: true, maxConcurrent });
+    }
+    // Repositories of a project: create the new ones, scope GitNexus to them and report each one's state / index one on demand.
+    if (req.method === 'POST' && url.pathname === '/api/repos/sync') {
+      const b = await readBody(req);
+      return json(res, 200, { ok: true, ...(await repoTools.sync(b.project, b.repos)) });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/repos/index') {
+      const b = await readBody(req);
+      return json(res, 200, { ok: true, ...(await repoTools.index(b.project, b.path)) });
     }
     if (url.pathname === '/api/runs' && req.method === 'GET') {
       // The history comes from the database; runs still in memory report their current status.

@@ -10,6 +10,8 @@ import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// The repositories feature calls the gitnexus CLI: tests use a fake one.
+process.env.SQUAD_GITNEXUS_BIN = path.join(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'), 'tests', 'fake-gitnexus.mjs');
 const PORT = 4400 + Math.floor(Math.random() * 300);
 const BASE = `http://127.0.0.1:${PORT}`;
 const tmp = prefix => mkdtempSync(path.join(tmpdir(), prefix));
@@ -518,4 +520,107 @@ test('chats are saved per kind, capped and swept when their feature is gone', as
   assert.equal((await api('/api/chats/agent/a1', { method: 'DELETE' })).status, 200);
   chats = pageTag(await page(), 'squad-memory').chats;
   assert.equal(chats.agent.a1, undefined);
+});
+
+/* ---- project repositories and GitNexus scope (repos.js) ---- */
+const FAKE_GITNEXUS = path.join(ROOT, 'tests', 'fake-gitnexus.mjs');
+const syncRepos = (project, repos) => api('/api/repos/sync', { method: 'POST', body: JSON.stringify({ project, repos }) });
+const registryOf = folder => { try { return JSON.parse(readFileSync(path.join(projectsRoot, folder, '.gitnexus-home', 'registry.json'), 'utf8')).map(e => realpathSync.native(e.path)); } catch { return []; } };
+
+test('repos sync: creates a new repository, scopes GitNexus to the project and configures Claude Code', async () => {
+  const base = tmp('squad-repos-'); extraDirs.push(base);
+  const existing = path.join(base, 'existing-api'), fresh = path.join(base, 'deep', 'new-ui'), folder = 'op-050-repos';
+  mkdirSync(path.join(existing, '.gitnexus'), { recursive: true });
+  const res = await syncRepos(folder, [
+    { path: existing, kind: 'existing', role: 'backend' },
+    { path: fresh, kind: 'new', role: 'frontend' },
+    { path: path.join(base, 'missing'), kind: 'existing' },
+    { path: 'relative/dir', kind: 'existing' },
+    { path: ROOT, kind: 'existing' },
+    { path: existing, kind: 'existing' },
+  ]);
+  assert.equal(res.status, 200, await res.clone().text());
+  const body = await res.json();
+  const [a, b, c, d, e, f] = body.repos;
+  assert.deepEqual([a.exists, a.indexed, a.registered, a.created, a.error, a.role], [true, true, true, false, '', 'backend']);
+  assert.deepEqual([b.exists, b.created, b.indexed, b.registered, b.role], [true, true, false, false, 'frontend']);
+  assert.ok(existsSync(fresh));
+  assert.ok(existsSync(path.join(fresh, '.git')) || b.warning, 'git init, or a warning when git is missing');
+  assert.match(c.error, /não existe/);
+  assert.match(d.error, /caminho completo/);
+  assert.match(e.error, /SQUAD\/CODE/);
+  assert.match(f.error, /repetido/);
+  assert.equal(body.configured, true);
+
+  const proj = realpathSync.native(path.join(projectsRoot, folder));
+  const mcp = JSON.parse(readFileSync(path.join(proj, '.mcp.json'), 'utf8')).mcpServers.gitnexus;
+  assert.equal(mcp.command, process.execPath);
+  assert.deepEqual(mcp.args, [realpathSync.native(FAKE_GITNEXUS), 'mcp']);
+  assert.equal(mcp.env.GITNEXUS_HOME, path.join(proj, '.gitnexus-home'));
+  const settings = JSON.parse(readFileSync(path.join(proj, '.claude', 'settings.json'), 'utf8'));
+  assert.deepEqual(settings.enabledMcpjsonServers, ['gitnexus']);
+  assert.deepEqual(settings.permissions.allow, ['mcp__gitnexus']);
+  assert.deepEqual(settings.permissions.deny, ['mcp__gitnexus__api_impact']);
+  assert.deepEqual(registryOf(folder), [realpathSync.native(existing)]);
+
+  // Idempotent: nothing is duplicated.
+  await syncRepos(folder, [{ path: existing, kind: 'existing' }]);
+  const again = JSON.parse(readFileSync(path.join(proj, '.claude', 'settings.json'), 'utf8'));
+  assert.deepEqual(again, settings);
+});
+
+test('repos index: analyze registers the repository only in the project registry; dropping it from the list unregisters it', async () => {
+  const base = tmp('squad-repos-'); extraDirs.push(base);
+  const one = path.join(base, 'one'), two = path.join(base, 'two'), folder = 'op-051-repos';
+  mkdirSync(one, { recursive: true }); mkdirSync(path.join(two, '.gitnexus'), { recursive: true });
+  let body = await (await syncRepos(folder, [{ path: one, kind: 'existing' }, { path: two, kind: 'existing' }])).json();
+  assert.deepEqual(body.repos.map(r => r.indexed), [false, true]);
+  assert.deepEqual(registryOf(folder), [realpathSync.native(two)]);
+
+  const idx = await api('/api/repos/index', { method: 'POST', body: JSON.stringify({ project: folder, path: one }) });
+  assert.equal(idx.status, 200, await idx.clone().text());
+  assert.equal((await idx.json()).ok, true);
+  assert.ok(existsSync(path.join(one, '.gitnexus')));
+  body = await (await syncRepos(folder, [{ path: one, kind: 'existing' }, { path: two, kind: 'existing' }])).json();
+  assert.deepEqual(body.repos.map(r => [r.indexed, r.registered]), [[true, true], [true, true]]);
+
+  // Only `one` stays in the list: `two` leaves the registry (its own .gitnexus folder is not touched).
+  body = await (await syncRepos(folder, [{ path: one, kind: 'existing' }])).json();
+  assert.deepEqual(registryOf(folder), [realpathSync.native(one)]);
+  assert.ok(existsSync(path.join(two, '.gitnexus')));
+});
+
+test('repos sync keeps the project config files it did not write and leaves invalid ones alone', async () => {
+  const base = tmp('squad-repos-'); extraDirs.push(base);
+  const repo = path.join(base, 'api'), folder = 'op-052-repos', proj = path.join(projectsRoot, folder);
+  mkdirSync(path.join(repo, '.gitnexus'), { recursive: true });
+  mkdirSync(path.join(proj, '.claude'), { recursive: true });
+  writeFileSync(path.join(proj, '.claude', 'settings.json'), JSON.stringify({ model: 'sonnet', permissions: { allow: ['Read'], deny: ['Bash'] } }));
+  writeFileSync(path.join(proj, '.mcp.json'), JSON.stringify({ mcpServers: { other: { command: 'x' } } }));
+  const body = await (await syncRepos(folder, [{ path: repo, kind: 'existing' }])).json();
+  assert.equal(body.configured, true);
+  const settings = JSON.parse(readFileSync(path.join(proj, '.claude', 'settings.json'), 'utf8'));
+  assert.equal(settings.model, 'sonnet');
+  assert.deepEqual(settings.permissions.allow, ['Read', 'mcp__gitnexus']);
+  assert.deepEqual(settings.permissions.deny, ['Bash', 'mcp__gitnexus__api_impact']);
+  const mcp = JSON.parse(readFileSync(path.join(proj, '.mcp.json'), 'utf8')).mcpServers;
+  assert.deepEqual(Object.keys(mcp).sort(), ['gitnexus', 'other']);
+
+  writeFileSync(path.join(proj, '.mcp.json'), 'not json');
+  const bad = await (await syncRepos(folder, [{ path: repo, kind: 'existing' }])).json();
+  assert.equal(bad.configured, false);
+  assert.match(bad.warnings.join(' '), /\.mcp\.json/);
+  assert.equal(readFileSync(path.join(proj, '.mcp.json'), 'utf8'), 'not json');
+});
+
+test('repos endpoints reject bad project folders, bad repository paths and a missing token', async () => {
+  assert.equal((await syncRepos('../escape', [])).status, 400);
+  assert.equal((await syncRepos('Not A Slug', [])).status, 400);
+  assert.equal((await fetch(BASE + '/api/repos/sync', { method: 'POST', body: '{}' })).status, 401);
+  const none = await (await syncRepos('op-053-repos', [])).json();
+  assert.deepEqual([none.repos, none.configured], [[], false]);
+  const idx = await api('/api/repos/index', { method: 'POST', body: JSON.stringify({ project: 'op-053-repos', path: path.join(tmpdir(), 'squad-does-not-exist') }) });
+  assert.equal(idx.status, 400);
+  const shallow = await api('/api/repos/index', { method: 'POST', body: JSON.stringify({ project: 'op-053-repos', path: '/' }) });
+  assert.equal(shallow.status, 400);
 });

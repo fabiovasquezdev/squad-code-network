@@ -98,6 +98,14 @@ to a temp file passed as `--agents <file>`, and `forwardSubagents:true` adds `--
 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, so an `Agent` tool call runs in the foreground and its tool_result is the colleague's
 report (framed as "[Subagent hand-back] ... The report follows:" with indented lines; `subagentReport` unwraps it).
 
+**Project repositories (`repos.js`).** `project.repos` (`{id, path, kind: existing|new, role}`, normalized by `normalizeRepos`) lists where a
+project's agents work. `POST /api/repos/sync` creates the folder (+ `git init`) of `new` ones, gives the project its own GitNexus registry
+(`projects/<folder>/.gitnexus-home`, via `GITNEXUS_HOME`, filtered to the listed repos) and merges `.mcp.json` / `.claude/settings.json`
+there; `POST /api/repos/index` runs `gitnexus analyze` for one repo. `runOptionsFor` uses the project's repos as `addDirs` (global
+`runtime.addDirs` only when the project has none) and `reposPromptBlock` adds them to step/plan prompts. `SQUAD_GITNEXUS_BIN` overrides the
+executable (tests use `tests/fake-gitnexus.mjs`). `CHAT_RUN` leaves `tools` undefined and allows only `mcp__gitnexus`, because `--tools`
+(even empty) hides every MCP tool.
+
 **`src/app.js` (state, UI, orchestration).**
 - One persisted `state` object (localStorage key `squad-code.network.v2`, export/import as JSON). Served by the bridge, the database
   copy is the truth (`diskSync`): the boot block takes `#squad-disk` unless the browser copy has pending saves on that same rev

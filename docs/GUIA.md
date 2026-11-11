@@ -147,6 +147,19 @@ Cada operação tem **uma única squad** (obrigatória no formulário; uma squad
 - **Glossário**: `Termo: definição`, um por linha;
 - **Arquitetura**: visão geral e a lista de **decisões (ADR)**, com título, status (Proposto, Aceito, Rejeitado, Depreciado, Substituído) e texto já com Contexto/Decisão/Consequências. **Adicionar ADR** e a lixeira renumeram ADR-001, ADR-002…
 
+#### Repositórios do projeto
+
+O formulário do projeto tem a seção **Repositórios do projeto**: uma linha por repositório, com o **caminho completo**, o **tipo** e o **papel** (backend, frontend ou referência).
+
+- **Existente (continuar)**: o agente continua nesse repositório e não recria a estrutura.
+- **Novo (criar)**: ao salvar, o bridge cria a pasta (inclusive as pastas intermediárias) e roda `git init`, se a pasta ainda não estiver dentro de um repositório git.
+- Só esses repositórios ficam abertos aos agentes (`--add-dir`) e ao **GitNexus** do projeto. Um projeto sem repositórios cadastrados continua usando os **Diretórios adicionais** globais das configurações.
+- O bridge escreve em `projects/<pasta>/`: um registro próprio do GitNexus (`.gitnexus-home/`, só com esses repositórios), o `.mcp.json` que liga o GitNexus e o `.claude/settings.json` que o libera (somente leitura; a ferramenta `api_impact` fica negada porque a API recusa o schema dela). Arquivos que já existem são mesclados, e um JSON inválido é deixado como está, com aviso.
+- O selo de cada linha mostra o estado: **GITNEXUS** (indexado e registrado), **NÃO INDEXADO** (com o botão **Indexar**, que roda `gitnexus analyze --skip-agents-md` só nesse repositório e cria `<repo>/.gitnexus`), **CRIADO** ou o erro. **Verificar** relê a lista do formulário e atualiza os selos.
+- O prompt de cada etapa e o plano do comandante ganham o bloco **Repositórios do projeto**, dizendo onde continuar e onde criar.
+- Pede o `gitnexus` no PATH (`npm i -g gitnexus`) ou a variável `SQUAD_GITNEXUS_BIN`. Caminhos rasos (a raiz, uma pasta de primeiro nível) e a pasta do próprio SQUAD/CODE são recusados.
+- Os turnos de chat (Agent Teams, conversa com agente, plano do comandante) não têm ferramentas de escrita, mas podem consultar o GitNexus do projeto.
+
 #### Agent Teams: o kickoff em reunião online
 
 Os primeiros dados da operação (briefing, visão do produto, escopo, glossário, arquitetura e ADRs) são co-escritos no **Agent Teams**, um meetup online no estilo do Microsoft Teams. Ele abre pelo botão **Agent Teams** na seção de briefing ou pelos retratos no rótulo do briefing e nas linhas da documentação. Participam o **comandante**, o **Reconhecedor PRD** e o **Reconhecedor ADR** da squad:
