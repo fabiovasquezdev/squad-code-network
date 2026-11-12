@@ -1,27 +1,30 @@
 #!/usr/bin/env node
 'use strict';
 /*
- * SQUAD/CODE bridge: serves index.html, spawns a headless agent CLI (`claude -p` or, per agent/run, `gemini -p`) and keeps
- * the app's data in SQLite (db.js). Only dependency: better-sqlite3 (`npm install`). Binds to 127.0.0.1 only and requires a
- * per-start token on every API call.
+ * SQUAD/CODE bridge: serves index.html, spawns a headless agent CLI (`claude -p` or `agy -p`, per agent/run) and keeps
+ * the app's data in SQLite (db.js). Only dependency: better-sqlite3 (`npm install`). Binds to 127.0.0.1 only and requires
+ * a per-start token on every API call.
  *
  *   node server.js [--port 4317]
  *
  * Environment:
  *   SQUAD_PORT        port (default 4317)
  *   SQUAD_CLAUDE_BIN  claude executable to use when the UI does not set one (default: "claude")
- *   SQUAD_GEMINI_BIN  gemini executable to use when the UI does not set one (default: "gemini")
+ *   SQUAD_AGY_BIN     Antigravity CLI executable to use when the UI does not set one (default: "agy")
  *   SQUAD_HOME        overrides the home dir used for ~/.claude/settings.json (tests)
  *   SQUAD_PROJECTS_DIR root of the per-project folders (default: ./projects next to this file)
  *   SQUAD_DATA_DIR    folder of the SQLite database, squad.db (default: ./data next to this file)
  *
- * Engines: `options.engine` ('claude' | 'gemini', default 'claude') picks which CLI a run spawns. Both engines are started
- * the same way (prompt on stdin, `-p`/`--output-format stream-json`) and the run's exit/history shape is identical either
- * way: the Gemini branch (geminiArgs/geminiEnv + translateGeminiLine) normalizes Gemini's own JSONL event shape into the
- * same Claude-shaped `assistant`/`user`/`result` events the rest of the bridge (persistEvent/storedEvent) and the whole
- * client (room, chats, console) already know how to read — so nothing outside this file needs to know which engine ran.
- * Claude-only features (squad colleagues via --agents/the Agent tool, --forward-subagent-text, --effort, --max-budget-usd)
- * have no stable Gemini CLI equivalent yet and are silently dropped for engine 'gemini' (validateRunOptions/startRun).
+ * Engines: `options.engine` ('claude' | 'antigravity', default 'claude') picks which CLI a run spawns. Both start the
+ * same way in spirit (`-p`/`--output-format stream-json`) and the run's exit/history shape is identical either way: the
+ * Antigravity branch (args/env + translateAgyEvent) normalizes agy's own JSONL event shape into the same Claude-shaped
+ * `assistant`/`user`/`result` events the rest of the bridge (persistEvent/storedEvent) and the whole client (room, chats,
+ * console) already know how to read — so nothing outside this file needs to know which engine ran. One real difference:
+ * Claude reads the prompt from stdin, but agy's `-p` only accepts it as the flag's own value (confirmed empirically — it
+ * errors "empty prompt" otherwise), so the Antigravity branch folds the system prompt into that same value instead of a
+ * `--append-system-prompt-file`-style file, capped well under the OS argv size limit. Claude-only features (squad
+ * colleagues via --agents/the Agent tool, --forward-subagent-text, --max-budget-usd, the project-folder read sandbox)
+ * have no stable Antigravity equivalent yet and are silently dropped for that engine (validateRunOptions/startRun).
  */
 const http = require('node:http');
 const fs = require('node:fs');
@@ -38,8 +41,8 @@ const HOST = '127.0.0.1';
 const TOKEN = crypto.randomBytes(24).toString('hex');
 const HOME = process.env.SQUAD_HOME || os.homedir();
 const DEFAULT_BIN = process.env.SQUAD_CLAUDE_BIN || 'claude';
-const DEFAULT_GEMINI_BIN = process.env.SQUAD_GEMINI_BIN || 'gemini';
-const ENGINES = ['claude', 'gemini'];
+const DEFAULT_AGY_BIN = process.env.SQUAD_AGY_BIN || 'agy';
+const ENGINES = ['claude', 'antigravity'];
 const IS_WIN = process.platform === 'win32';
 const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-code-'));
 // Every project runs in its own folder under PROJECTS_DIR (created on the first run).
@@ -74,11 +77,10 @@ function needStore() {
 }
 
 const PERMISSION_MODES = ['acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan'];
-// Gemini CLI's --approval-mode has no 1:1 match for every Claude Code permission mode: map conservatively and fail closed
-// (Gemini's own 'default' still denies/asks for anything not pre-approved by --tools/--allowed-tools, same spirit as
-// Claude's 'manual'/'dontAsk' in headless mode). 'yolo' is reserved for the one mode the person picked meaning exactly
-// that: bypassPermissions ("SEM VERIFICAÇÕES" in the UI).
-const GEMINI_APPROVAL = { acceptEdits: 'auto_edit', plan: 'plan', bypassPermissions: 'yolo' };
+// Antigravity CLI (agy) has its own permission model (allow/ask/deny action(target) rules in --settings, plus --mode and
+// --dangerously-skip-permissions) with no 1:1 mapping to Claude's tool allowlists: map conservatively and fail closed.
+// bypassPermissions is handled separately as --dangerously-skip-permissions.
+const AGY_MODE = { acceptEdits: 'accept-edits', plan: 'plan' };
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const TOOL_RE = /^[A-Za-z][A-Za-z0-9_]*(\([^()\r\n"]{0,200}\))?$|^mcp__[A-Za-z0-9_-]+(__[A-Za-z0-9_*-]+)?$/;
 const MODEL_RE = /^[A-Za-z0-9._\-\[\]]{1,80}$/;
@@ -279,7 +281,7 @@ function validateRunOptions(o = {}) {
   const out = {};
   out.engine = ENGINES.includes(o.engine) ? o.engine : 'claude';
   out.claudePath = typeof o.claudePath === 'string' && o.claudePath.trim() ? o.claudePath.trim() : DEFAULT_BIN;
-  out.geminiPath = typeof o.geminiPath === 'string' && o.geminiPath.trim() ? o.geminiPath.trim() : DEFAULT_GEMINI_BIN;
+  out.agyPath = typeof o.agyPath === 'string' && o.agyPath.trim() ? o.agyPath.trim() : DEFAULT_AGY_BIN;
   if (typeof o.project === 'string' && o.project.trim()) {
     const dir = projectDir(o.project);
     fs.mkdirSync(dir, { recursive: true });
@@ -339,50 +341,53 @@ function validateAgents(value) {
   return entries.length ? out : null;
 }
 
-/* Gemini CLI's own `-p --output-format stream-json` JSONL events (docs/cli/headless.md: init, message, tool_use,
- * tool_result, error, result) translated into the Claude-shaped events the rest of the bridge and the whole client
- * already read (assistant/user content blocks, a final `result` line). Field names below are a best-effort reading of
- * Gemini CLI's documented event list (there is no local Gemini CLI install to verify the exact payload against); unknown
- * shapes fall back to a `raw` passthrough rather than throwing, and a run still finishes correctly (exit code, stderr)
- * even if a given line's fields don't match what's expected here. */
-function translateGeminiEvent(evt, state) {
+/* Antigravity CLI (agy) --output-format stream-json events (init/step_update/result; confirmed empirically — there is no
+ * public spec — by running `agy -p ... --output-format stream-json` directly) translated into the Claude-shaped events
+ * the rest of the bridge and the whole client already read (assistant/user content blocks, a final `result` line). Shape
+ * notes from that testing: tool calls are step_update rows keyed by step_index (state ACTIVE → DONE/ERROR, no separate
+ * call id, so "<conversation_id>:<step_index>" stands in for one); assistant text streams as repeated
+ * step_type:"agent_response" rows with a text_delta chunk each — many small assistant events that accumulate into one
+ * reply; the final result carries the full response text, SUCCESS/ERROR status and token usage but no dollar cost. */
+function translateAgyEvent(evt, state) {
   if (!evt || typeof evt !== 'object') return [{ type: 'raw', text: String(evt).slice(0, 4000) }];
   const text = v => typeof v === 'string' ? v : '';
-  switch (evt.type) {
-    case 'init':
-      return [{ type: 'system', subtype: 'init', session_id: evt.sessionId || evt.session_id || null, model: evt.model || null, permissionMode: 'yolo', tools: Array.isArray(evt.tools) ? evt.tools : [] }];
-    case 'message': {
-      if (evt.role === 'user') return []; // the echoed prompt, not the model's own output
-      const t = text(evt.content) || text(evt.text);
+  if (evt.event === 'init') {
+    const i = evt.init || {};
+    return [{ type: 'system', subtype: 'init', session_id: evt.conversation_id || null, model: i.model || null, permissionMode: i.permission_mode || null, tools: Array.isArray(i.tools) ? i.tools : [] }];
+  }
+  if (evt.event === 'step_update') {
+    const s = evt.step_update || {};
+    if (s.step_type === 'tool') {
+      const id = `${s.conversation_id || ''}:${s.step_index}`;
+      if (s.state === 'ACTIVE') {
+        state.toolNames.set(id, s.tool_name || 'tool');
+        return [{ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: s.tool_name || 'tool', input: s.tool_info?.parameters || {} }] } }];
+      }
+      if (s.state === 'DONE' || s.state === 'ERROR') {
+        const info = s.tool_info || {};
+        const content = text(info.output) || text(info.error?.message) || (info.error ? JSON.stringify(info.error) : '');
+        return [{ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, is_error: s.state === 'ERROR', content }] } }];
+      }
+      return [];
+    }
+    if (s.step_type === 'agent_response') {
+      const t = text(s.text_delta);
       return t ? [{ type: 'assistant', message: { content: [{ type: 'text', text: t }] } }] : [];
     }
-    case 'tool_use': {
-      const id = String(evt.id || evt.callId || evt.call_id || evt.toolCallId || evt.tool_call_id || `gemini-${++state.seq}`);
-      const name = evt.name || evt.toolName || evt.tool_name || 'tool';
-      state.toolNames.set(id, name);
-      return [{ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input: evt.args || evt.input || evt.parameters || {} }] } }];
-    }
-    case 'tool_result': {
-      const id = String(evt.id || evt.callId || evt.call_id || evt.toolCallId || evt.tool_call_id || '');
-      const content = text(evt.output) || text(evt.result) || text(evt.content) || (evt.output ?? evt.result ?? evt.content ? JSON.stringify(evt.output ?? evt.result ?? evt.content) : '');
-      return [{ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, is_error: !!(evt.error || evt.isError), content }] } }];
-    }
-    case 'error':
-      return [{ type: 'stderr', text: String(evt.message || evt.error || 'Erro do Gemini CLI.').slice(0, 4000) }];
-    case 'result': {
-      const stats = evt.stats || {};
-      return [{
-        type: 'result', is_error: !!evt.error,
-        result: text(evt.response) || text(evt.result),
-        total_cost_usd: stats.cost ?? evt.cost ?? null,
-        duration_ms: stats.durationMs ?? stats.duration_ms ?? evt.durationMs ?? null,
-        num_turns: stats.turns ?? stats.turnCount ?? evt.turns ?? null,
-        session_id: evt.sessionId || evt.session_id || null,
-      }];
-    }
-    default:
-      return [{ type: 'raw', text: JSON.stringify(evt).slice(0, 4000) }];
+    return []; // step_type "user_input" etc.: just an echo marker, nothing to show
   }
+  if (evt.event === 'result') {
+    const r = evt.result || {}, isError = r.status !== 'SUCCESS';
+    return [{
+      type: 'result', is_error: isError,
+      result: text(r.response) || (isError ? text(r.error) : ''),
+      total_cost_usd: null, // agy reports token usage, not a dollar cost
+      duration_ms: typeof r.duration_seconds === 'number' ? Math.round(r.duration_seconds * 1000) : null,
+      num_turns: r.num_turns ?? null,
+      session_id: r.conversation_id || null,
+    }];
+  }
+  return [{ type: 'raw', text: JSON.stringify(evt).slice(0, 4000) }];
 }
 
 async function startRun(body) {
@@ -392,36 +397,47 @@ async function startRun(body) {
   const systemPrompt = typeof body.systemPrompt === 'string' ? body.systemPrompt.slice(0, 100000) : '';
   const opts = validateRunOptions(body.options);
   if (activeCount() >= maxConcurrent) throw Object.assign(new Error(`Limite de ${maxConcurrent} execuções simultâneas atingido.`), { status: 429 });
-  const isGemini = opts.engine === 'gemini';
-  const binPath = isGemini ? opts.geminiPath : opts.claudePath;
+  const isAgy = opts.engine === 'antigravity';
+  // agy's permissions.allow/ask/deny rules have no verified equivalent to Claude's "dontAsk denies whatever is not in
+  // allowedTools" guarantee (there is no 1:1 flag mapping, see AGY_MODE above), so a caller relying on that combination
+  // as a hard restriction (chat turns limited to one read-only MCP tool, see CHAT_RUN in src/app.js) would silently run
+  // unrestricted on this engine. Refuse rather than pretend the restriction holds; everyday squad runs use a different
+  // permission mode and are unaffected.
+  if (isAgy && opts.permissionMode === 'dontAsk' && opts.allowedTools.length) throw new Error('O motor Antigravity ainda não garante negar o que não está em allowedTools (modo "dontAsk"). Use o engine Claude para esta chamada.');
+  const binPath = isAgy ? opts.agyPath : opts.claudePath;
   const resolved = await resolveBin(binPath);
-  if (!resolved) throw new Error(`${isGemini ? 'Gemini CLI' : 'Claude Code'} não encontrado ("${binPath}"). Ajuste o caminho nas configurações.`);
+  if (!resolved) throw new Error(`${isAgy ? 'Antigravity CLI' : 'Claude Code'} não encontrado ("${binPath}"). Ajuste o caminho nas configurações.`);
   if (opts.projectRun) await ensureProjectRepo(opts.cwd);
 
   const id = crypto.randomUUID();
   let sysFile = null, settingsFile = null, agentsFile = null;
   // OS temp cleanup can remove the (usually empty) folder while the bridge keeps running.
-  if (systemPrompt.trim() || opts.projectRun || (opts.agents && !isGemini)) await fsp.mkdir(TMP_DIR, { recursive: true });
-  if (systemPrompt.trim()) {
+  if (systemPrompt.trim() || opts.projectRun || (opts.agents && !isAgy)) await fsp.mkdir(TMP_DIR, { recursive: true });
+  if (systemPrompt.trim() && !isAgy) {
     sysFile = path.join(TMP_DIR, `${id}.system.md`);
     await fsp.writeFile(sysFile, systemPrompt, 'utf8');
   }
 
-  const args = isGemini ? ['-p', '', '--output-format', 'stream-json'] : ['-p', '--output-format', 'stream-json'];
+  const args = [];
   const engineEnv = {};
-  if (isGemini) {
-    // Gemini CLI headless mode (docs/cli/headless.md): no stable equivalent yet for squad colleagues (--agents/the Agent
-    // tool), --forward-subagent-text, --effort or --max-budget-usd, so those are silently dropped for this engine.
-    // Unlike Claude's `-p` (a bare flag), Gemini's `-p`/`--prompt` is yargs-typed as a required string: a bare `-p`
-    // followed by another flag makes yargs error "Not enough arguments following: p" and dump --help instead of
-    // running. `-p ''` satisfies the parser while the real prompt still goes over stdin, which Gemini appends to it.
-    if (sysFile) engineEnv.GEMINI_SYSTEM_MD = sysFile; // replaces, rather than appends to, the built-in system prompt
+  let agyPrompt = null; // redacted out of run.args below, same as the other engine's system-prompt/settings files
+  if (isAgy) {
+    // agy (Antigravity CLI): confirmed empirically that -p/--print has no stdin-prompt support at all — unlike Claude's
+    // bare -p, which reads stdin, agy errors "empty prompt" either way. The prompt, and — since there is no
+    // system-prompt flag either — the agent's own instructions, have to go as the literal value of -p. spawn()'s args
+    // array never goes through a shell, so this is still free of shell injection, but it does count against the OS argv
+    // size limit (ARG_MAX, shared with the inherited environment), so cap it well short of that rather than risk an
+    // opaque E2BIG from the OS on a large combined prompt.
+    agyPrompt = systemPrompt.trim() ? `${systemPrompt}\n\n---\n\n${prompt}` : prompt;
+    if (agyPrompt.length > 200000) throw new Error('Prompt grande demais para o motor Antigravity, que não aceita entrada por stdin. Reduza o prompt/instruções ou use o engine Claude.');
+    args.push('-p', agyPrompt, '--output-format', 'stream-json');
     if (opts.model) args.push('--model', opts.model);
-    // Mirrors the configured permission mode rather than always bypassing approval: only bypassPermissions maps to yolo.
-    args.push('--approval-mode', GEMINI_APPROVAL[opts.permissionMode] || 'default');
-    if (opts.tools) args.push('--tools', opts.tools.join(','));
-    if (opts.allowedTools.length) args.push('--allowed-tools', opts.allowedTools.join(','));
-    for (const d of opts.addDirs) args.push('--include-directories', d);
+    if (opts.effort) args.push('--effort', opts.effort);
+    // No stable equivalent yet for squad colleagues (--agents/the Agent tool), --forward-subagent-text, --max-budget-usd,
+    // or the project-folder read sandbox Claude gets (see validateRunOptions/startRun comments) — all silently dropped.
+    if (opts.permissionMode === 'bypassPermissions') args.push('--dangerously-skip-permissions');
+    else if (AGY_MODE[opts.permissionMode]) args.push('--mode', AGY_MODE[opts.permissionMode]);
+    for (const d of opts.addDirs) args.push('--add-dir', d);
   } else {
     // No --permission-prompts: Claude Code 2.1.153 rejects it ("unknown option"). In -p mode a prompt nobody can answer is denied anyway.
     args.push('--verbose');
@@ -456,14 +472,14 @@ async function startRun(body) {
     // Project runs: git stops at PROJECTS_DIR (see ensureProjectRepo), even when the folder's own .git is missing.
     env: {
       ...process.env, ...engineEnv,
-      ...(isGemini ? {} : { CLAUDE_CODE_ENTRYPOINT: process.env.CLAUDE_CODE_ENTRYPOINT || 'squad-code-bridge', ...(opts.agents ? { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1' } : {}) }),
+      ...(isAgy ? {} : { CLAUDE_CODE_ENTRYPOINT: process.env.CLAUDE_CODE_ENTRYPOINT || 'squad-code-bridge', ...(opts.agents ? { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1' } : {}) }),
       ...(opts.projectRun ? { GIT_CEILING_DIRECTORIES: gitCeiling() } : {}),
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   const run = {
     id, status: 'running', startedAt: new Date().toISOString(), endedAt: null, label: String(body.label || '').slice(0, 200),
-    cwd: opts.cwd, args: args.map(a => a === sysFile ? '<system-prompt-file>' : a === settingsFile ? '<settings-file>' : a === agentsFile ? '<agents-file>' : a), child, events: [], clients: new Set(),
+    cwd: opts.cwd, args: args.map(a => a === sysFile ? '<system-prompt-file>' : a === settingsFile ? '<settings-file>' : a === agentsFile ? '<agents-file>' : a === agyPrompt ? '<prompt+instruções>' : a), child, events: [], clients: new Set(),
     result: null, sysFile, settingsFile, agentsFile, timer: null, cancelled: false,
     // History: who ran it and where (body.meta, whitelisted in db.js), saved events count and the batch waiting to be written.
     // Without a database yet (direct API use before the setup), the run still works but stays out of the history.
@@ -476,13 +492,14 @@ async function startRun(body) {
   run.timer = setTimeout(() => { run.timedOut = true; pushEvent(run, { type: 'bridge', subtype: 'timeout', timeoutSec: opts.timeoutSec }); killTree(child); }, opts.timeoutSec * 1000);
 
   let buffer = '';
-  const geminiState = { toolNames: new Map(), seq: 0 };
-  // Claude's stdout lines are already the event shape the room/console/chats read; a Gemini line is translated into that
-  // same shape first (zero or more events per line), so every consumer downstream of pushEvent stays engine-agnostic.
+  const engineState = { toolNames: new Map(), seq: 0 };
+  // Claude's stdout lines are already the event shape the room/console/chats read; an Antigravity line is translated
+  // into that same shape first (zero or more events per line), so every consumer downstream of pushEvent stays
+  // engine-agnostic.
   const feedLine = line => {
     let evt; try { evt = JSON.parse(line); } catch { pushEvent(run, { type: 'raw', text: line.slice(0, 4000) }); return; }
-    if (!isGemini) { if (evt.type === 'result') run.result = evt; pushEvent(run, evt); return; }
-    for (const translated of translateGeminiEvent(evt, geminiState)) {
+    if (!isAgy) { if (evt.type === 'result') run.result = evt; pushEvent(run, evt); return; }
+    for (const translated of translateAgyEvent(evt, engineState)) {
       if (translated.type === 'result') run.result = translated;
       pushEvent(run, translated);
     }
@@ -512,7 +529,7 @@ async function startRun(body) {
       result: typeof r.result === 'string' ? r.result : '',
       costUsd: r.total_cost_usd ?? r.cost_usd ?? null, durationMs: r.duration_ms ?? null,
       numTurns: r.num_turns ?? null, sessionId: r.session_id ?? null,
-      error: isError ? (run.cancelled ? 'Execução cancelada pelo operador.' : run.timedOut ? 'Tempo limite excedido.' : (r.is_error && r.result) || stderrTail.trim().slice(-1500) || `${isGemini ? 'gemini' : 'claude'} saiu com código ${code}`) : null,
+      error: isError ? (run.cancelled ? 'Execução cancelada pelo operador.' : run.timedOut ? 'Tempo limite excedido.' : (r.is_error && r.result) || stderrTail.trim().slice(-1500) || `${isAgy ? 'agy' : 'claude'} saiu com código ${code}`) : null,
     };
     pushEvent(run, exit);
     if (run.persist) try { store.finishRun(run, exit); } catch (e) { console.warn(`Histórico da execução ${id} não finalizado: ${e.message}`); }
@@ -616,9 +633,9 @@ async function handle(req, res) {
   try {
     if (req.method === 'GET' && url.pathname === '/api/health') {
       const bin = url.searchParams.get('claudePath') || DEFAULT_BIN;
-      const geminiBin = url.searchParams.get('geminiPath') || DEFAULT_GEMINI_BIN;
-      const [info, geminiInfo] = await Promise.all([claudeVersion(bin), claudeVersion(geminiBin)]);
-      return json(res, 200, { ok: true, bridge: 'squad-code', claudeVersion: info.version, claudePath: info.resolved, claudeError: info.error, geminiVersion: geminiInfo.version, geminiPath: geminiInfo.resolved, geminiError: geminiInfo.error, defaultCwd: process.cwd(), projectsDir: longPath(PROJECTS_DIR), home: HOME, platform: process.platform, activeRuns: activeCount(), maxConcurrent, dbReady: !setupNeeded(), dbPath: store?.file || DB_FILE });
+      const agyBin = url.searchParams.get('agyPath') || DEFAULT_AGY_BIN;
+      const [info, agyInfo] = await Promise.all([claudeVersion(bin), claudeVersion(agyBin)]);
+      return json(res, 200, { ok: true, bridge: 'squad-code', claudeVersion: info.version, claudePath: info.resolved, claudeError: info.error, agyVersion: agyInfo.version, agyPath: agyInfo.resolved, agyError: agyInfo.error, defaultCwd: process.cwd(), projectsDir: longPath(PROJECTS_DIR), home: HOME, platform: process.platform, activeRuns: activeCount(), maxConcurrent, dbReady: !setupNeeded(), dbPath: store?.file || DB_FILE });
     }
     // First start: the page creates the database with the workspace the person chose (from scratch, the example, a backup or the
     // browser's copy). Validated before anything is written; refused once a workspace exists.
@@ -763,11 +780,11 @@ server.listen(PORT, HOST, () => {
   if (process.env.SQUAD_PRINT_TOKEN) console.log(`TOKEN=${TOKEN}`);
   claudeVersion(DEFAULT_BIN).then(info => {
     if (info.version) console.log(`Claude Code ${info.version} (${info.resolved})`);
-    else console.warn(`Claude Code não encontrado (${DEFAULT_BIN}): ${info.error}\n  Instale o Claude Code, rode "claude" uma vez para fazer login e reinicie, ou aponte SQUAD_CLAUDE_BIN para o executável.\n  Sem ele os agentes em modo Claude ficam só na simulação (os em modo Gemini continuam funcionando).`);
+    else console.warn(`Claude Code não encontrado (${DEFAULT_BIN}): ${info.error}\n  Instale o Claude Code, rode "claude" uma vez para fazer login e reinicie, ou aponte SQUAD_CLAUDE_BIN para o executável.\n  Sem ele os agentes em modo Claude ficam só na simulação (os em modo Antigravity continuam funcionando).`);
   }, () => {});
-  claudeVersion(DEFAULT_GEMINI_BIN).then(info => {
-    if (info.version) console.log(`Gemini CLI ${info.version} (${info.resolved})`);
-    else console.warn(`Gemini CLI não encontrado (${DEFAULT_GEMINI_BIN}): ${info.error}\n  Instale com "npm i -g @google/gemini-cli" e faça login, ou aponte SQUAD_GEMINI_BIN para o executável.\n  Sem ele os agentes em modo Gemini ficam só na simulação (os em modo Claude continuam funcionando).`);
+  claudeVersion(DEFAULT_AGY_BIN).then(info => {
+    if (info.version) console.log(`Antigravity CLI ${info.version} (${info.resolved})`);
+    else console.warn(`Antigravity CLI não encontrado (${DEFAULT_AGY_BIN}): ${info.error}\n  Instale com "curl -fsSL https://antigravity.google/cli/install.sh | bash" e faça login, ou aponte SQUAD_AGY_BIN para o executável.\n  Sem ele os agentes em modo Antigravity ficam só na simulação (os outros motores continuam funcionando).`);
   }, () => {});
 });
 
