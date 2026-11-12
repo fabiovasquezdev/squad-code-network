@@ -49,12 +49,21 @@ order**, into one classic `<script>`: `portraits.js`, `avatars.js`, `conventions
 ## Architecture
 
 **`server.js` (bridge) + `db.js` (SQLite).** Serves `index.html` (injecting a per-start random token), binds to
-127.0.0.1 only, and every `/api` call needs the token plus local Host/Origin. `/api/runs` spawns
-`claude -p --output-format stream-json --verbose --permission-prompts none`, writes the agent's system
-prompt to a temp file passed as `--append-system-prompt-file`, sends the step prompt via **stdin**
-(never shell-interpolated), and streams events back. Options (permission mode, effort, tools, model,
-dirs, budget, `partial` → `--include-partial-messages`) are whitelisted. Limits: body 2 MB, prompt 400k chars, system prompt 100k (silently
-sliced). It also reads/writes Claude `settings.json` files (user/project/local) with a `.bak` copy.
+127.0.0.1 only, and every `/api` call needs the token plus local Host/Origin. `/api/runs` spawns one of two engines,
+chosen per run by `options.engine` (`'claude'` default, or `'gemini'`; UI: per-agent `a.engine` field, falling back to
+the workspace's `runtime.engine`): `claude -p --output-format stream-json --verbose --permission-prompts none` (system
+prompt in a temp file via `--append-system-prompt-file`), or `gemini -p --output-format stream-json --approval-mode yolo`
+(system prompt via the `GEMINI_SYSTEM_MD` env var, which *replaces* rather than appends to the built-in prompt). Both send
+the step prompt via **stdin** (never shell-interpolated). Gemini's own JSONL event shape (`init`/`message`/`tool_use`/
+`tool_result`/`error`/`result`) is translated by `translateGeminiEvent` into the same Claude-shaped `assistant`/`user`/
+`result` events before `pushEvent`, so `persistEvent`/`storedEvent`, the run history and every client consumer (console,
+room, chats) stay engine-agnostic. Claude-only features with no stable Gemini CLI equivalent yet — squad colleagues via
+`--agents`/the Agent tool, `--forward-subagent-text`, `--effort`, `--max-budget-usd` — are silently dropped for engine
+`gemini` (`squadSubagents` returns none for a Gemini-engine caller, so it also gets no "colleagues" block in its prompt).
+`SQUAD_GEMINI_BIN` picks the default Gemini executable (`gemini`), mirroring `SQUAD_CLAUDE_BIN`. Options (permission mode,
+effort, tools, model, dirs, budget, `partial` → `--include-partial-messages`) are whitelisted. Limits: body 2 MB, prompt
+400k chars, system prompt 100k (silently sliced). It also reads/writes Claude `settings.json` files (user/project/local)
+with a `.bak` copy.
 Every project runs in its own folder: the `project` option (a plain slug, `FOLDER_RE`, no Windows reserved names) becomes the
 cwd `<PROJECTS_DIR>/<folder>` (`./projects` next to `server.js`, created at start; `SQUAD_PROJECTS_DIR` for tests), created on the
 first run. Because Claude Code loads CLAUDE.md from every folder above the cwd, those runs also get `--settings <temp file>` with
@@ -251,10 +260,16 @@ executable (tests use `tests/fake-gitnexus.mjs`). `CHAT_RUN` leaves `tools` unde
   human review; only approval marks it done and unblocks dependents.
 - Agents: `ROLES` defines specialties; Squad Studio presets come from `AGENT_PRESETS` and
   `OP_CATEGORIES` (operators picked by category → sub-specialty, generalist first) and are
-  materialized by `createPresetAgent`. Each agent has `model` (catalog `CLAUDE_MODELS`: aliases, pinned IDs, `inherit`;
-  any id valid for the bridge survives import) and `effort` (`EFFORTS`, `''` = model default; none for Haiku,
-  `modelEffortSupport`). The global runtime model/effort override the agent's (`runOptionsFor` → `agentEffort`); both go
-  to the exported `.claude/agents/*.md` frontmatter (`agentMarkdown`) and to the CLAUDE.md command-chain table.
+  materialized by `createPresetAgent`. Each agent has `engine` (`''` = workspace default from `runtime.engine`, else
+  `'claude'`/`'gemini'`; `agentEngine(a,r)`), `model` (catalog `CLAUDE_MODELS` or, when the effective engine is Gemini,
+  `GEMINI_MODELS`: aliases, pinned IDs, `inherit`; any id valid for the bridge survives import) and `effort` (`EFFORTS`,
+  `''` = model default; none for Haiku or for any Gemini-engine agent, `modelEffortSupport`). The global runtime
+  model/effort override the agent's only when its effective engine is Claude (`runOptionsFor` → `agentEffort`); the
+  Gemini engine has no effort flag and keeps the agent's own model. Agent Studio's MODELO/ESFORÇO fields
+  (`modelFieldHTML`/`effortFieldHTML`/`syncEngineField`) swap catalogs live on the MOTOR select. Both model and effort go
+  to the exported `.claude/agents/*.md` frontmatter (`agentMarkdown`) and to the CLAUDE.md command-chain table (Claude-only
+  export format; Gemini-engine agents still export as Claude subagent files, since the export is a project scaffold, not a
+  live run).
 - SOUL: `src/souls.js` (`AGENT_SOULS` per catalog codename + `GENERIC_SOUL`) gives each agent `soul`/`hellos` (greeting variations, one picked at random per chat)
   (`defaultSoul`); it shapes the chat tone and greeting (`soulBlock`, `feGreeting`) and is exported (`soulMarkdown`).
   Tone rules for every agent chat: human, no catchphrases, no dashes (`soulBlock`, `AGENT_CHAT_SYSTEM`, `COWRITE_SYSTEM`), and
