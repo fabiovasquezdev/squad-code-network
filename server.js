@@ -14,6 +14,10 @@
  *   SQUAD_HOME        overrides the home dir used for ~/.claude/settings.json (tests)
  *   SQUAD_PROJECTS_DIR root of the per-project folders (default: ./projects next to this file)
  *   SQUAD_DATA_DIR    folder of the SQLite database, squad.db (default: ./data next to this file)
+ *   STITCH_API_KEY    optional — when set, the bridge registers Google's Stitch design MCP (stitch.googleapis.com/mcp)
+ *                      with both CLIs at start (`mcp add`, remembered by each CLI itself across projects/machines).
+ *                      An agent still needs "Restringir às ferramentas do agente" off (or Stitch in its allowedTools)
+ *                      to actually call it — see registerStitchMcp.
  *
  * Engines: `options.engine` ('claude' | 'antigravity', default 'claude') picks which CLI a run spawns. Both start the
  * same way in spirit (`-p`/`--output-format stream-json`) and the run's exit/history shape is identical either way: the
@@ -139,6 +143,41 @@ function resolveBin(bin) {
       const lines = String(stdout).split(/\r?\n/).map(s => s.trim()).filter(Boolean);
       const pick = IS_WIN ? (lines.find(l => /\.(exe|cmd|bat)$/i.test(l)) || lines[0]) : lines[0];
       resolve(pick || null);
+    });
+  });
+}
+
+/* Stitch (Google's design-to-code MCP, https://stitch.googleapis.com/mcp) gives an agent a project's screens, style and
+ * generated markup as design reference — useful context for the mobile/frontend specialist's own hand-written code, not
+ * a source of literal Flutter/Dart output (Stitch only generates web markup). Wiring it in per run (a temp --mcp-config
+ * file, mirroring sysFile/settingsFile) would need the key resolved into that file ourselves: .mcp.json's own ${VAR}
+ * expansion is confirmed broken for the `headers` field on HTTP-transport servers in current Claude Code (still-open
+ * upstream issue, so unlike claudeMdExcludes/permissions this one cannot just be generated once and trusted to read the
+ * env at spawn time). Registering it through each CLI's own `mcp add` instead sidesteps that bug entirely and needs no
+ * new per-run plumbing: once added this way it is remembered by that CLI across every future project and machine, the
+ * same as logging in once. Only runs when STITCH_API_KEY is set — unset, nothing changes, no new behavior to break.
+ * Whether a given agent can actually call it is still gated the normal way: "Restringir às ferramentas do agente" must
+ * be off for that agent (or its allowedTools must list the Stitch tools), since a --tools restriction hides all MCP
+ * tools no matter which servers are registered. */
+function registerStitchMcp() {
+  const key = process.env.STITCH_API_KEY;
+  if (!key) return;
+  const url = 'https://stitch.googleapis.com/mcp', header = `X-Goog-Api-Key: ${key}`;
+  // Node's execFile puts the full argv (key included, via --header) into a failed call's own Error#message — redact it
+  // before this ever reaches console.warn, which a shell redirect or log aggregator could otherwise persist in the clear.
+  const redact = s => String(s).split(key).join('***');
+  resolveBin(DEFAULT_BIN).then(resolved => {
+    if (!resolved) return;
+    execFile(resolved, ['mcp', 'add', '--transport', 'http', 'stitch', url, '--header', header, '-s', 'user'], { windowsHide: true }, err => {
+      if (!err) console.log('Stitch MCP registrado para o Claude Code (escopo "user").');
+      else if (!/already exists/i.test(String(err.message))) console.warn(`Não consegui registrar o Stitch MCP no Claude Code: ${redact(err.message)}`);
+    });
+  });
+  resolveBin(DEFAULT_AGY_BIN).then(resolved => {
+    if (!resolved) return;
+    execFile(resolved, ['mcp', 'add', '--header', header, 'stitch', url], { windowsHide: true }, err => {
+      if (!err) console.log('Stitch MCP registrado para o Antigravity CLI.');
+      else if (!/already exists/i.test(String(err.message))) console.warn(`Não consegui registrar o Stitch MCP no Antigravity CLI: ${redact(err.message)}`);
     });
   });
 }
@@ -785,6 +824,7 @@ server.listen(PORT, HOST, () => {
   else console.log(`Banco de dados: nenhum em ${DATA_DIR}. Abra ${url} para criar um.`);
   if (store?.interrupted) console.log(`${store.interrupted} execução(ões) interrompida(s) na última sessão marcada(s) no histórico.`);
   if (process.env.SQUAD_PRINT_TOKEN) console.log(`TOKEN=${TOKEN}`);
+  registerStitchMcp();
   claudeVersion(DEFAULT_BIN).then(info => {
     if (info.version) console.log(`Claude Code ${info.version} (${info.resolved})`);
     else console.warn(`Claude Code não encontrado (${DEFAULT_BIN}): ${info.error}\n  Instale o Claude Code, rode "claude" uma vez para fazer login e reinicie, ou aponte SQUAD_CLAUDE_BIN para o executável.\n  Sem ele os agentes em modo Claude ficam só na simulação (os em modo Antigravity continuam funcionando).`);
