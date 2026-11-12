@@ -2463,7 +2463,17 @@ function roomEvent(ctx,evt){
  if(evt.type==='assistant'){
   const parent=evt.parent_tool_use_id||null,who=parent?ctx.calls.get(parent):ctx.agentId,thread=parent?ctx.cards.get(parent)?.id:undefined;if(!who)return;
   for(const b of evt.message?.content||[]){
-   if(b.type==='text'&&b.text.trim()){const raw=b.text.trim();const m=roomPush({kind:'say',agentId:who,featureKey:ctx.key,thread,text:roomClip(raw,1600),raw:raw.slice(0,400)});ctx.last[who]=m;if(!parent)ctx.lastMain=m;}
+   if(b.type==='text'&&b.text.trim()){
+    // Antigravity's translateAgyEvent emits one assistant event per small text_delta chunk (its native event shape has
+    // no aggregated "full message" event the way Claude's does), so a bare roomPush() per event here used to open a new
+    // bubble per chunk instead of one bubble per turn. Grow the same bubble while it is still pure text (no tool
+    // activity attached yet, same thread) instead; a tool_use already reuses+appends to ctx.last[who] the same way, so
+    // this only changes the earlier, always-fresh-bubble behavior for consecutive text with nothing in between.
+    let m=ctx.last[who];
+    if(m&&m.kind==='say'&&m.thread===thread&&!m.activity?.length){const full=((m._raw||m.raw||'')+b.text).trim();m._raw=full;m.text=roomClip(full,1600);m.raw=full.slice(0,400);roomUpdate(m);}
+    else{const full=b.text.trim();m=roomPush({kind:'say',agentId:who,featureKey:ctx.key,thread,text:roomClip(full,1600),raw:full.slice(0,400)});m._raw=full;ctx.last[who]=m;}
+    if(!parent)ctx.lastMain=m;
+   }
    else if(b.type==='tool_use'&&b.name==='Agent'&&!parent){const type=String(b.input?.subagent_type||'subagente'),target=ctx.keys[type]||null,id=target||'sub:'+type;ctx.calls.set(b.id,id);if(target)roomCalling.add(target);
     ctx.cards.set(b.id,roomPush({kind:'call',from:ctx.agentId,to:target,toLabel:target?'':type,featureKey:ctx.key,text:String(b.input?.prompt||b.input?.description||''),status:'open'}));ctx.lastMain=null;roomChrome();}
    else if(b.type==='tool_use'){let m=ctx.last[who];if(!m){m=roomPush({kind:'say',agentId:who,featureKey:ctx.key,thread,text:'',activity:[]});ctx.last[who]=m;}(m.activity??=[]).push({...toolActivity(b),toolId:b.id});roomUpdate(m);if(!parent)ctx.lastMain=null;}
