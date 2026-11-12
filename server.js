@@ -404,6 +404,13 @@ async function startRun(body) {
   // unrestricted on this engine. Refuse rather than pretend the restriction holds; everyday squad runs use a different
   // permission mode and are unaffected.
   if (isAgy && opts.permissionMode === 'dontAsk' && opts.allowedTools.length) throw new Error('O motor Antigravity ainda não garante negar o que não está em allowedTools (modo "dontAsk"). Use o engine Claude para esta chamada.');
+  // opts.tools is the hard per-agent restriction from the "Restringir às ferramentas do agente" toggle (restrictTools,
+  // on by default — see runOptionsFor in src/app.js). Confirmed empirically: a `--settings` permissions.deny rule for agy
+  // is silently ignored once --dangerously-skip-permissions is also passed (ran `agy -p "..." --dangerously-skip-permissions
+  // --settings '{"permissions":{"deny":["run_command"]}}'` and the denied tool still executed), which is exactly what
+  // bypassPermissions maps to below. Building a deny list would therefore look like a restriction without being one in
+  // the one mode most squads actually use for automation — refuse instead of giving false confidence.
+  if (isAgy && opts.tools && opts.permissionMode === 'bypassPermissions') throw new Error('O motor Antigravity não consegue restringir as ferramentas do agente no modo "bypassPermissions" (--dangerously-skip-permissions ignora as regras de bloqueio). Desmarque "Restringir às ferramentas do agente" para este agente, ou use outro modo de permissão, ou troque para o engine Claude.');
   const binPath = isAgy ? opts.agyPath : opts.claudePath;
   const resolved = await resolveBin(binPath);
   if (!resolved) throw new Error(`${isAgy ? 'Antigravity CLI' : 'Claude Code'} não encontrado ("${binPath}"). Ajuste o caminho nas configurações.`);
@@ -440,7 +447,7 @@ async function startRun(body) {
     for (const d of opts.addDirs) args.push('--add-dir', d);
   } else {
     // No --permission-prompts: Claude Code 2.1.153 rejects it ("unknown option"). In -p mode a prompt nobody can answer is denied anyway.
-    args.push('--verbose');
+    args.push('-p', '--output-format', 'stream-json', '--verbose');
     if (sysFile) args.push('--append-system-prompt-file', sysFile);
     if (opts.projectRun) {
       settingsFile = path.join(TMP_DIR, `${id}.settings.json`);
