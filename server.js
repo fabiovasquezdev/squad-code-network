@@ -39,6 +39,12 @@ const crypto = require('node:crypto');
 const { spawn, execFile } = require('node:child_process');
 
 const ROOT = __dirname;
+// Deterministic, zero-token check (console.log/debugger/pdb.set_trace left in committed code) run as a Claude Code
+// PostToolUse hook instead of relying on the model to notice it. Claude-only for now: the equivalent Antigravity
+// mechanism (.agents/hooks.json or ~/.gemini/config/hooks.json) did not fire in testing against agy 1.5.6 — confirmed
+// empirically (a PostToolUse hook on write_file in both locations never ran), matching open upstream issues about its
+// hooks.json schema. Revisit once that is fixed upstream.
+const DEBUG_HOOK_SCRIPT = path.join(ROOT, 'scripts', 'hooks', 'check-debug-leftovers.py');
 const argPort = process.argv.indexOf('--port');
 const PORT = Number(argPort > -1 ? process.argv[argPort + 1] : process.env.SQUAD_PORT) || 4317;
 const HOST = '127.0.0.1';
@@ -492,7 +498,11 @@ async function startRun(body) {
       settingsFile = path.join(TMP_DIR, `${id}.settings.json`);
       // The file tools also refuse reads outside the project folder (and --add-dir), so agents never take this app or the
       // person's other folders for the project.
-      await fsp.writeFile(settingsFile, JSON.stringify({ claudeMdExcludes: APP_MEMORY_EXCLUDES, permissions: { blockReadsOutsideWorkingDirectories: true } }), 'utf8');
+      await fsp.writeFile(settingsFile, JSON.stringify({
+        claudeMdExcludes: APP_MEMORY_EXCLUDES,
+        permissions: { blockReadsOutsideWorkingDirectories: true },
+        hooks: { PostToolUse: [{ matcher: 'Write|Edit', hooks: [{ type: 'command', command: `python3 "${DEBUG_HOOK_SCRIPT}"` }] }] },
+      }), 'utf8');
       args.push('--settings', settingsFile);
     }
     if (opts.agents) {

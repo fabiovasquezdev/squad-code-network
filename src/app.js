@@ -2184,6 +2184,13 @@ function buildStepPrompt(f,a,p){
  const brief=f.briefs?.length===f.route.length?f.briefs[f.step]:'',mates=Object.entries(squadSubagents(a,p).keys).map(([key,id])=>{const m=agentById(id);return`- ${key}: ${m.name}, ${roleLabel(m)}`;});
  const deps=f.dependencies.map(id=>p.features.find(x=>x.id===id)).filter(Boolean).map(d=>{const last=[...d.outputs].reverse().find(o=>!o.error);return`- ${d.key} / ${d.title}${last?`\n  Entrega aprovada (${agentById(last.agentId)?.name||'agente'}):\n  ${clip(last.text,2000).replace(/\n/g,'\n  ')}`:''}`;}).join('\n');
  const previous=f.outputs.slice(f.runStart??f.outputs.length).filter(o=>!o.error).slice(-4).map(o=>`### ${agentById(o.agentId)?.name||'Agente'} (${agentById(o.agentId)?roleLabel(agentById(o.agentId)):''})\n${clip(o.text,6000)}`).join('\n\n');
+ // A retry resumes the same agent at the same step (launchNext/resumeFeature never move currentAgentId back), but
+ // "previous" above drops error outputs on purpose, so a step that failed mid-way (timeout, network error) used to hand
+ // the retry zero memory of its own last attempt — it had to rediscover everything from the repo alone, which eats into
+ // the very timeout budget it just ran out of. Surface that agent's own last failed narrative (often a to-do list of
+ // what it had reached) so it orients itself against what is already on disk instead of restarting its reasoning cold.
+ const lastFail=[...f.outputs].reverse().find(o=>o.error&&o.agentId===a.id);
+ const retryNote=lastFail?`## A sua tentativa anterior desta etapa não terminou\nAntes de recomeçar, confira o que já está no repositório: é bem provável que parte do que você descreveu abaixo já esteja escrita nos arquivos. Não refaça o que já existe; só continue, corrija ou complete o que faltar.\n\n${clip(lastFail.text,4000)}`:'';
  return[
   `# Operação ${p.code}: ${p.name}`,
   `## Briefing do projeto\n${p.briefing||'(sem briefing)'}`,...(p.repos?.length?[reposPromptBlock(p)]:[]),
@@ -2192,6 +2199,7 @@ function buildStepPrompt(f,a,p){
   deps?`## Dependências já aprovadas\n${deps}`:'',
   f.context?`## Contexto de handoff registrado\n${clip(f.context,6000)}`:'',
   previous?`## Entregas anteriores nesta rota\n${previous}`:'',
+  retryNote,
   brief?`## Instrução do comandante para você\n${brief}`:'',
   mates.length?`## Colegas que você pode chamar\nUse a ferramenta Agent com subagent_type igual ao identificador para pedir a um colega uma decisão, uma revisão ou uma parte que é da especialidade dele. Explique no pedido o que precisa e o contexto. O colega trabalha na mesma pasta, com as ferramentas dele, e devolve a resposta para você. Não delegue a sua etapa inteira.\n${mates.join('\n')}`:'',
   `## Entrega esperada\nSiga rigorosamente o guia de convenções e boas práticas anexado às suas instruções. Trabalhe na pasta desta operação, que é o diretório de trabalho atual (projects/${p.folder}): todo código, teste e documento da implementação fica dentro dela, e nada fora dela deve ser criado ou alterado. Execute a sua parte respeitando o seu papel. Não declare testes ou verificações que não executou.\n${next?`Ao terminar, responda com um resumo de handoff para ${next.name} (${roleLabel(next)}): o que foi feito, arquivos alterados, decisões, pendências e o próximo passo.`:'Você é a última etapa. Responda com um relatório para a revisão humana: o que foi entregue, arquivos alterados, evidências de verificação executadas, lacunas e riscos.'}\nResponda em português do Brasil.`
@@ -2327,6 +2335,15 @@ function roomPush(msg,p=project()){
 }
 const roomDirty=new Set();let roomFrame=0;
 function roomUpdate(m){if(!m)return;roomQueue(m,roomOwner.get(m));officeFeed();roomDirty.add(m);if(roomFrame)return;roomFrame=requestAnimationFrame(()=>{roomFrame=0;const list=[...roomDirty],feed=roomFeedEl();roomDirty.clear();if(!feed)return;const near=roomNear(feed);for(const x of list){const el=feed.querySelector(`[data-rid="${x.id}"]`);if(el)el.outerHTML=roomMsgHTML(x);}if(near)feed.scrollTop=feed.scrollHeight;});}
+// A growing streamed bubble (roomEvent's text-delta accumulation) still needs roomUpdate's full outerHTML replace for
+// the final settle, but calling that on every tiny chunk destroys and recreates the bubble element each time — any
+// CSS entrance animation tied to it (e.g. the pop-in) restarts on every chunk, which reads as a rapid flicker instead
+// of smooth growth. Same fix chatStream already uses for the phone chat: patch just the text node in place.
+function roomPaintText(m){
+ const feed=roomFeedEl(),el=feed?.querySelector(`[data-rid="${m.id}"] .room-bubble`);
+ if(el){const near=roomNear(feed);el.innerHTML=renderMarkdown(m.text);if(near)feed.scrollTop=feed.scrollHeight;}
+ roomQueue(m,roomOwner.get(m));officeFeed();
+}
 function roomRemove(m){const r=roomOf(),i=r.messages.indexOf(m);if(i>=0)r.messages.splice(i,1);roomQueue(m,roomOwner.get(m)||project().id,true);roomFeedEl()?.querySelector(`[data-rid="${m.id}"]`)?.remove();officeFeed();}
 function roomTypingHTML(r){const t=r.typing;return t?`<div class="room-row room-typing">${roomFace(t.agentId,'sm')}<span><b>${E(roomAgentName(t.agentId))}</b> ${E(t.label||'está digitando')}</span><i class="room-dots"><b></b><b></b><b></b></i></div>`:'';}
 function roomTyping(agentId,label=''){const r=roomOf();r.typing=agentId?{agentId,label}:null;const feed=roomFeedEl();if(feed){const near=roomNear(feed);feed.querySelector('.room-typing')?.remove();feed.insertAdjacentHTML('beforeend',roomTypingHTML(r));if(near)feed.scrollTop=feed.scrollHeight;}roomChrome();}
@@ -2470,7 +2487,7 @@ function roomEvent(ctx,evt){
     // activity attached yet, same thread) instead; a tool_use already reuses+appends to ctx.last[who] the same way, so
     // this only changes the earlier, always-fresh-bubble behavior for consecutive text with nothing in between.
     let m=ctx.last[who];
-    if(m&&m.kind==='say'&&m.thread===thread&&!m.activity?.length){const full=((m._raw||m.raw||'')+b.text).trim();m._raw=full;m.text=roomClip(full,1600);m.raw=full.slice(0,400);roomUpdate(m);}
+    if(m&&m.kind==='say'&&m.thread===thread&&!m.activity?.length){const full=((m._raw||m.raw||'')+b.text).trim();m._raw=full;m.text=roomClip(full,1600);m.raw=full.slice(0,400);roomPaintText(m);}
     else{const full=b.text.trim();m=roomPush({kind:'say',agentId:who,featureKey:ctx.key,thread,text:roomClip(full,1600),raw:full.slice(0,400)});m._raw=full;ctx.last[who]=m;}
     if(!parent)ctx.lastMain=m;
    }
@@ -2668,7 +2685,12 @@ async function liveStep(f,a){
  if(runner!==owner||exit.cancelled)return;
  if(exit.error||exit.isError){
   const message=exit.error||'Falha na execução do Claude Code.';
-  f.outputs.push({agentId:a.id,at:nowISO(),text:`[FALHA] ${message}`,simulated:false,error:true,costUsd:exit.costUsd??null,durationMs:null,sessionId:exit.sessionId??null});
+  // The bridge's own failure reason (timeout, dropped connection) says nothing about how far the agent actually got.
+  // ctx.last[agentId] is its most recent streamed bubble and, unlike ctx.lastMain, is not cleared by a tool call — a
+  // timeout usually lands mid-tool-call, so lastMain would be null right when it matters most. Keep this text so a
+  // retry's buildStepPrompt (retryNote) has something real to orient against instead of just the bare error string.
+  const partial=exit.room?.last?.[a.id]?.text?.trim();
+  f.outputs.push({agentId:a.id,at:nowISO(),text:`[FALHA] ${message}`+(partial?`\n\nO que o agente tinha relatado até aqui:\n${partial}`:''),simulated:false,error:true,costUsd:exit.costUsd??null,durationMs:null,sessionId:exit.sessionId??null});
   f.status='ready';runner=null;clearTimeout(timer);
   log(`${a.name} falhou em ${f.key}: ${message.slice(0,400)}. A feature voltou para Prontas, pronta para retomar de onde parou.`,'agent',a.id,p);p.logs.at(-1).simulated=false;
   roomTyping(null);roomPush({kind:'say',agentId:a.id,featureKey:f.key,text:`Não consegui concluir a ${f.key}: ${message.slice(0,600)}`,error:true});roomPush({kind:'system',text:`${f.key} voltou para Prontas. Tentar novamente retoma a partir de ${a.name}, sem refazer as etapas já concluídas.`,tone:'error',retryFeatureId:f.id});
