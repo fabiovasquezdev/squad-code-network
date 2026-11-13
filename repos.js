@@ -16,7 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const KINDS = ['existing', 'new'];
-const ROLES = ['backend', 'frontend', 'reference'];
+const ROLES = ['backend', 'frontend', 'mobile', 'fullstack', 'reference'];
 const MAX_REPOS = 20;
 const IS_WIN = process.platform === 'win32';
 
