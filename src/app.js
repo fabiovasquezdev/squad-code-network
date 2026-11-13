@@ -691,7 +691,7 @@ function defaultConventions(a,preset){
 }
 function conventionsMarkdown(c){if(!c)return'';const parts=[];if(c.base?.trim())parts.push(c.base.trim());for(const s of c.subsets||[])if(s.content?.trim())parts.push(`## ${s.name||'Subset'}\n${s.content.trim()}`);return parts.join('\n\n');}
 const CONV_HEADER='# Convenções e boas práticas (obrigatório)\nSiga este guia em todo código, nome, estrutura, teste e entrega desta etapa. Se o repositório já tiver um padrão diferente, siga o padrão do repositório e registre a divergência na entrega.';
-function agentSystemPrompt(a){const g=conventionsMarkdown(a?.conventions),base=String(a?.prompt||'').trim();return(g?`${base}\n\n${CONV_HEADER}\n\n${g}`:base).slice(0,99000);}
+function agentSystemPrompt(a,{includeConventions=true}={}){const base=String(a?.prompt||'').trim();if(!includeConventions)return base.slice(0,20000);const g=conventionsMarkdown(a?.conventions);return(g?`${base}\n\n${CONV_HEADER}\n\n${g}`:base).slice(0,99000);}
 function conventionLabel(a){
  const c=a?.conventions||defaultConventions(a);if(!c)return'';
  const lib=c.template?.startsWith('lib:')?state.conventionLibrary.templates.find(t=>'lib:'+t.id===c.template):null,t=lib||convTemplateOf(c.family,c.template),n=(c.subsets||[]).length;
@@ -1491,7 +1491,7 @@ async function runCoWrite(msgs){
    const turn={i,crew,round};
    try{
     // Chat runs: no tools and no plan mode (its planning flow slowed replies and made the model fake tool calls); text streams live.
-    const started=await bridgeFetch('/api/runs',{method:'POST',body:JSON.stringify({prompt:doc?docCoWritePrompt(a,c,msgs,turn):coWritePrompt(a,msgs),systemPrompt:agentSystemPrompt(a)+'\n\n'+[soulBlock(a,chatGreeting(c,a)),doc?docCoWriteSystem(doc,a,c,turn):COWRITE_SYSTEM].filter(Boolean).join('\n\n'),label:doc?`${a.name} / co-escrita ${doc.title.toLowerCase()}`:`${a.name} / co-escrita ${ui.opsFeatureDraft?.feature.key||''}`,meta:runMeta(doc&&ui.opsNew?null:project(),a,doc?null:ui.opsFeatureDraft?.feature,doc?'doc':'cowrite'),options:{...runOptionsFor(a,runtime(),doc&&ui.opsNew?null:project()),...chatRunOptions()}})});
+    const started=await bridgeFetch('/api/runs',{method:'POST',body:JSON.stringify({prompt:doc?docCoWritePrompt(a,c,msgs,turn):coWritePrompt(a,msgs),systemPrompt:agentSystemPrompt(a,{includeConventions:false})+'\n\n'+[soulBlock(a,chatGreeting(c,a)),doc?docCoWriteSystem(doc,a,c,turn):COWRITE_SYSTEM].filter(Boolean).join('\n\n'),label:doc?`${a.name} / co-escrita ${doc.title.toLowerCase()}`:`${a.name} / co-escrita ${ui.opsFeatureDraft?.feature.key||''}`,meta:runMeta(doc&&ui.opsNew?null:project(),a,doc?null:ui.opsFeatureDraft?.feature,doc?'doc':'cowrite'),options:{...runOptionsFor(a,runtime(),doc&&ui.opsNew?null:project()),...chatRunOptions()}})});
     if(!mine()){bridgeFetch(`/api/runs/${started.runId}/cancel`,{method:'POST'}).catch(()=>{});return;}
     c.runId=started.runId;c.read=true;chatReceipt();chatTyping(true);
     // The tile goes from "pensando" to "falando" with the first words; a screen still shared by a colleague goes back to the gallery.
@@ -1952,7 +1952,7 @@ async function runAgentChat(msgs,task){
  const c=chatNow(),a=agentById(c?.agentId);if(c?.kind!=='agent'||!a||!msgs.length)return;
  const token={};c.token=token;c.busy=true;c.started=Date.now();c.read=false;const mine=()=>chatNow()===c&&c.token===token;let live=null;
  try{
-  const started=await bridgeFetch('/api/runs',{method:'POST',body:JSON.stringify({prompt:agentChatPrompt(a,c,msgs,task),systemPrompt:agentSystemPrompt(a)+'\n\n'+[soulBlock(a,c.greeting),AGENT_CHAT_SYSTEM].filter(Boolean).join('\n\n'),label:`${a.name} / conversa`,meta:runMeta(project(),a,null,'chat'),options:{...runOptionsFor(a),...chatRunOptions()}})});
+  const started=await bridgeFetch('/api/runs',{method:'POST',body:JSON.stringify({prompt:agentChatPrompt(a,c,msgs,task),systemPrompt:agentSystemPrompt(a,{includeConventions:false})+'\n\n'+[soulBlock(a,c.greeting),AGENT_CHAT_SYSTEM].filter(Boolean).join('\n\n'),label:`${a.name} / conversa`,meta:runMeta(project(),a,null,'chat'),options:{...runOptionsFor(a),...chatRunOptions()}})});
   if(!mine()){bridgeFetch(`/api/runs/${started.runId}/cancel`,{method:'POST'}).catch(()=>{});return;}
   c.runId=started.runId;c.read=true;chatReceipt();chatTyping(true);
   live=chatStream(mine);const exit=await streamRun(started.runId,live.onEvent);
@@ -1971,7 +1971,7 @@ async function runFeatureBreakdown(c,a,msgs){
  const token={};c.token=token;c.busy=true;c.started=Date.now();c.read=false;const mine=()=>chatNow()===c&&c.token===token;let live=null;
  const task='Quebre o escopo do projeto em todas as features que ainda faltam, cobrindo o que está descrito no briefing e no escopo dentro/fora, sem repetir as features que já existem.';
  try{
-  const started=await bridgeFetch('/api/runs',{method:'POST',body:JSON.stringify({prompt:agentChatPrompt(a,c,msgs,task),systemPrompt:agentSystemPrompt(a)+'\n\n'+[soulBlock(a,c.greeting),PRD_BREAKDOWN_SYSTEM].filter(Boolean).join('\n\n'),label:`${a.name} / quebra de escopo`,meta:runMeta(project(),a,null,'chat'),options:{...runOptionsFor(a),...chatRunOptions()}})});
+  const started=await bridgeFetch('/api/runs',{method:'POST',body:JSON.stringify({prompt:agentChatPrompt(a,c,msgs,task),systemPrompt:agentSystemPrompt(a,{includeConventions:false})+'\n\n'+[soulBlock(a,c.greeting),PRD_BREAKDOWN_SYSTEM].filter(Boolean).join('\n\n'),label:`${a.name} / quebra de escopo`,meta:runMeta(project(),a,null,'chat'),options:{...runOptionsFor(a),...chatRunOptions()}})});
   if(!mine()){bridgeFetch(`/api/runs/${started.runId}/cancel`,{method:'POST'}).catch(()=>{});return;}
   c.runId=started.runId;c.read=true;chatReceipt();chatTyping(true);
   live=chatStream(mine);const exit=await streamRun(started.runId,live.onEvent);
@@ -2566,7 +2566,7 @@ function validatePlan(data,suggest){
  return used?plan:null;
 }
 async function commanderPlanRun(owner,cmd,p,suggest){
- let started;try{started=await bridgeFetch('/api/runs',{method:'POST',body:JSON.stringify({prompt:commanderPlanPrompt(p,owner,suggest),systemPrompt:agentSystemPrompt(cmd)+'\n\n'+[soulBlock(cmd),COMMANDER_PLAN_SYSTEM].filter(Boolean).join('\n\n'),label:`${cmd.name} / plano de ${owner.label}`,meta:runMeta(p,cmd,null,'plan'),options:{...runOptionsFor(cmd,runtime(),p),...chatRunOptions(),timeoutSec:300}})});}
+ let started;try{started=await bridgeFetch('/api/runs',{method:'POST',body:JSON.stringify({prompt:commanderPlanPrompt(p,owner,suggest),systemPrompt:agentSystemPrompt(cmd,{includeConventions:false})+'\n\n'+[soulBlock(cmd),COMMANDER_PLAN_SYSTEM].filter(Boolean).join('\n\n'),label:`${cmd.name} / plano de ${owner.label}`,meta:runMeta(p,cmd,null,'plan'),options:{...runOptionsFor(cmd,runtime(),p),...chatRunOptions(),timeoutSec:300}})});}
  catch(error){return{error:error.message};}
  if(runner!==owner){bridgeFetch(`/api/runs/${started.runId}/cancel`,{method:'POST'}).catch(()=>{});return{cancelled:true};}
  owner.planRunId=started.runId;const c=newConsole({runId:started.runId,agentId:cmd.id,featureId:null});let text='',bubble=null;
