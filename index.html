@@ -10741,9 +10741,10 @@ function ensureSetup(p){
  return s;
 }
 // Sprints group a project's features (every feature belongs to exactly one); the first sprint absorbs orphans.
-function createSprint(index,extra={}){return{id:id('sprint'),name:'Sprint '+pad(index),goal:'',...extra};}
+function createSprint(index,extra={}){return{id:id('sprint'),name:'Sprint '+pad(index),goal:'',repoPaths:[],...extra};}
 function sprintById(sid,p=project()){return(p?.sprints||[]).find(s=>s.id===sid)||null;}
 function sprintOf(f,p=project()){return sprintById(f?.sprintId,p)||p?.sprints?.[0]||null;}
+function sprintRepos(s,p=project()){const all=p?.repos||[];if(!s||!Array.isArray(s.repoPaths)||!s.repoPaths.length)return all;const set=new Set(s.repoPaths),active=all.filter(r=>set.has(r.path));return active.length?active:all;}
 function sprintFeatures(s,p=project()){const first=p.sprints?.[0];return p.features.filter(f=>f.sprintId===s.id||(s===first&&!sprintById(f.sprintId,p)));}
 function sprintCode(s,p=project()){return'S'+pad(Math.max(0,(p?.sprints||[]).indexOf(s))+1);}
 function currentSprint(p=project()){const list=p?.sprints||[];return list.find(s=>sprintFeatures(s,p).some(f=>f.status!=='done'))||list.at(-1)||null;}
@@ -10797,7 +10798,7 @@ function normalizeWorkspace(raw){
  const projects=raw.projects.map(p=>{
   if(!p||!Array.isArray(p.features)||p.features.length>150)throw Error('Projeto ou quantidade de features inválidos.');
   const ids=arr(p.agentIds,80).filter(a=>agentIds.has(a));
-  const sprints=arr(p.sprints,50).filter(s=>s&&typeof s==='object').map(s=>({id:validId(s.id),name:str(s.name,60)||'Sprint',goal:str(s.goal,2000)}));if(!sprints.length)sprints.push(createSprint(1));const sprintIds=new Set(sprints.map(s=>s.id));
+  const sprints=arr(p.sprints,50).filter(s=>s&&typeof s==='object').map(s=>({id:validId(s.id),name:str(s.name,60)||'Sprint',goal:str(s.goal,2000),repoPaths:arr(s.repoPaths,20).map(x=>str(x,500)).filter(Boolean)}));if(!sprints.length)sprints.push(createSprint(1));const sprintIds=new Set(sprints.map(s=>s.id));
   // A feature's live step runs server-side as a detached process: reloading the page only drops the browser's own
   // `runner`/subscription, it does not kill that process or move the feature back to square one. So even a feature
   // caught mid-step (status 'running') keeps its currentAgentId/step here — only the status itself converts to 'ready'
@@ -11580,7 +11581,7 @@ async function repoIndex(path,btn){
  catch(e){toast('Indexar: '+e.message,'error');}
  const form=$('#projectForm');if(form)repoCheck(form);else repoSync(p,true);
 }
-function reposPromptBlock(p){const r=p?.repos||[];if(!r.length)return'';const role={backend:'backend',frontend:'frontend',reference:'referência (só leitura)'};return`## Repositórios do projeto\n${r.map(x=>`- ${x.path} (${role[x.role]||x.role}): ${x.kind==='new'?'NOVO. Crie e desenvolva aqui; a pasta já existe, vazia.':'EXISTENTE. Continue neste repositório; não recrie a estrutura.'}`).join('\n')}\nTrabalhe só nesses repositórios. Para entender código use o GitNexus, que lista apenas estes. Se faltar um repositório, peça ao humano para incluí-lo.`;}
+function reposPromptBlock(p,targetRepos=null){const all=p?.repos||[];if(!all.length)return'';const r=targetRepos||all,role={backend:'backend',frontend:'frontend',reference:'referência (só leitura)'},isFiltered=r.length<all.length;return`## Repositórios da etapa\n${r.map(x=>`- ${x.path} (${role[x.role]||x.role}): ${x.kind==='new'?'NOVO. Crie e desenvolva aqui; a pasta já existe, vazia.':'EXISTENTE. Continue neste repositório; não recrie a estrutura.'}`).join('\n')}\nTrabalhe só nesses repositórios.${isFiltered?` Esta sprint foca nestes ${r.length} microsserviços/projetos específicos.`:''} Para entender código ou consultar outros serviços do ecossistema, use o GitNexus (mcp__gitnexus), que indexa o grafo completo do projeto. Se faltar um repositório, peça ao humano para incluí-lo.`;}
 function projectFormHTML(p,isNew){return`<form id="projectForm" class="ops-form" novalidate><div class="form-grid"><div class="field full"><label for="projectName">NOME DO PROJETO</label><input name="name" id="projectName" value="${E(p.name)}" maxlength="70" placeholder="Ex.: Atlas Commerce"></div><div class="field full" data-doc-row="briefing"><div class="doc-label-row"><label for="projectBriefing">BRIEFING DO PROJETO</label>${docAgentButton('briefing',docAgents('kickoff',squadById(p.squadId)))}</div><textarea name="briefing" id="projectBriefing" maxlength="20000" style="min-height:150px" placeholder="Objetivo, usuários, escopo, restrições e definição de pronto.">${E(p.briefing)}</textarea></div>${squadPickerHTML(p)}${projectDocsHTML(p)}${projectReposHTML(p)}${projectSkillsHTML(p)}${projectIntegrationsHTML(p)}${isNew?`<div class="field full"><label for="projectFeatures">FEATURES INICIAIS / UMA POR LINHA</label><textarea id="projectFeatures" name="features" maxlength="20000" placeholder="Autenticação de usuários&#10;Catálogo de produtos&#10;Painel administrativo"></textarea><span class="hint">Voce poderá detalhar critérios, prioridades e dependências depois.</span></div>`:''}</div></form>`;}
 function saveProject(form){
  if(!guardMutation())return;const isNew=!!ui.opsNew,d=new FormData(form),p=isNew?ui.opsNew:clone(project()),name=String(d.get('name')||'').trim(),briefing=String(d.get('briefing')||'').trim(),sq=squadById(d.get('squadId'));
@@ -11782,14 +11783,30 @@ function chatPush(m){
 }
 function chatFooter(m){chatPersist(chatNow());const f=$(`#feMsgs [data-mid="${m.id}"] .fe-foot`);if(f)f.innerHTML=feFootHTML(m);}
 function feSendState(){const i=$('#feChatInput'),b=$('.fe-send');if(i&&b)b.disabled=!i.value.trim();}
+function compactChatHistory(greeting,messages,freshIds,agentName){
+ const prior=messages.filter(m=>!freshIds.has(m.id)&&m.role!=='system').slice(-10);
+ const rows=greeting?[`${agentName}: ${greeting}`]:[];
+ prior.forEach((m,i)=>{
+  const isRecent=i>=prior.length-4,author=m.role==='user'?'Pessoa':agentName;
+  const text=isRecent?m.text:(m.text.length>200?m.text.slice(0,200)+' […]':m.text);
+  rows.push(`${author}: ${text}`);
+ });
+ return rows.join('\n\n');
+}
 function coWritePrompt(a,msgs){
  const p=project(),f=ui.opsFeatureDraft?.feature,val=id=>(document.getElementById(id)?.value||'').trim(),clip=(t,n)=>t.length>n?t.slice(0,n)+' […]':t,c=ui.featureChat,fresh=new Set(msgs.map(m=>m.id));
  const deps=[...document.querySelectorAll('#featureForm [name=dependencies]:checked')].map(x=>featureById(x.value)?.key).filter(Boolean);
- const others=p.features.filter(x=>x.id!==f?.id).map(x=>`- ${x.key}: ${x.title} (${SCOPES[x.scope]||x.scope}, ${x.priority})`).join('\n');
- const history=[`${a.name}: ${c.greeting||feGreeting(a)}`,...c.messages.filter(m=>!fresh.has(m.id)&&m.role!=='system').slice(-12).map(m=>`${m.role==='user'?'Pessoa':a.name}: ${m.text}`)].join('\n\n');
- return[`# Co-escrita da feature ${f?.key||''} · ${p.code} ${p.name}`,`## Projeto\n${clip(p.briefing||'(sem briefing)',3000)}`,p.scopeIn?.trim()?`Dentro do escopo:\n${clip(p.scopeIn,1500)}`:'',p.scopeOut?.trim()?`Fora do escopo:\n${clip(p.scopeOut,1500)}`:'',others?`## Outras features do projeto\n${others}`:'',
+ const otherList=p.features.filter(x=>x.id!==f?.id);
+ const others=otherList.slice(0,12).map(x=>`- ${x.key}: ${x.title} (${SCOPES[x.scope]||x.scope}, ${x.priority})`).join('\n')+(otherList.length>12?`\n- ... e mais ${otherList.length-12} features no backlog.`:'');
+ const history=compactChatHistory(c.greeting||feGreeting(a),c.messages,fresh,a.name);
+ return[`# Co-escrita da feature ${f?.key||''} · ${p.code} ${p.name}`,
+  `## Projeto\n${clip(p.briefing||'(sem briefing)',2000)}`,
+  p.scopeIn?.trim()?`Dentro do escopo:\n${clip(p.scopeIn,1200)}`:'',
+  p.scopeOut?.trim()?`Fora do escopo:\n${clip(p.scopeOut,1200)}`:'',
+  others?`## Outras features do projeto\n${others}`:'',
+  history?`## Conversa até aqui\n${history}`:'',
   `## Formulário agora (a pessoa pode ter editado)\nTítulo: ${val('featureTitle')||'(vazio)'}\nÁrea: ${SCOPES[val('featureScope')]||''} · Prioridade: ${val('featurePriority')}${deps.length?` · Depende de: ${deps.join(', ')}`:''}\n\n### Escopo\n${val('featureDescription')||'(vazio)'}\n\n### Critérios de aceitação\n${val('featureCriteria')||'(vazio)'}\n\n### Tarefas\n${val('featureTasks')||'(vazio)'}`,
-  history?`## Conversa até aqui\n${history}`:'',`## ${msgs.length>1?'Novas mensagens':'Nova mensagem'} da pessoa\n${msgs.map(m=>m.text).join('\n\n')}`].filter(Boolean).join('\n\n');
+  `## ${msgs.length>1?'Novas mensagens':'Nova mensagem'} da pessoa\n${msgs.map(m=>m.text).join('\n\n')}`].filter(Boolean).join('\n\n');
 }
 // Chat bubbles never show a dash used as punctuation (em/en dash, or a hyphen between spaces). Code and numeric ranges stay.
 function chatClean(t){return String(t||'').split(/(```[\s\S]*?```|`[^`\n]*`)/).map((part,i)=>i%2?part:part.replace(/^([ \t]*)[—–][ \t]*/gm,'$1').replace(/[ \t]*[—–][ \t]*$/gm,'').replace(/(\S)([ \t]*)[—–]([ \t]*)(?=(\S))/g,(m,a,s1,s2,b)=>!s1&&!s2&&/\d/.test(a)&&/\d/.test(b)?m:a+', ').replace(/(\S)[ \t]+-[ \t]+(?=\S)/g,'$1, ').replace(/,[ \t]*([,.;:!?])/g,'$1').replace(/(\S)[ \t]{2,}/g,'$1 ')).join('').trim();}
@@ -12295,16 +12312,25 @@ function sendAgentChat(){
  if(c.busy)c.queue.push(m);else runAgentChat([m]);
 }
 function agentChatPrompt(a,c,msgs,task){
- const p=project(),q=squadById(p.squadId),clip=(t,n)=>acClip(t,n),fresh=new Set(msgs.map(m=>m.id)),names=ids=>ids.map(x=>agentById(x)?.name).filter(Boolean).join(' → ');
+ const p=project(),q=squadById(p.squadId),clip=(t,n)=>acClip(t,n),fresh=new Set(msgs.map(m=>m.id));
  const team=p.agentIds.map(agentById).filter(Boolean).map(x=>`- ${x.name}: ${roleLabel(x)}${x.id===a.id?' (você)':''}`).join('\n');
- const feats=!p.features.length?'':p.sprints.map(s=>{const fs=sprintFeatures(s,p);return`### ${s.name}${s.goal?`: ${s.goal}`:''}\n${fs.map(f=>`- ${f.key}: ${f.title} (${STATUS[f.status]||f.status}, ${f.priority}${f.route.length?`, rota: ${names(f.route)}`:''})`).join('\n')||'(sem features)'}`;}).join('\n');
  const f=c.focus?.feature?featureById(c.focus.feature):null,adr=c.focus?.adr?(p.adrs||[]).find(x=>x.id===c.focus.adr):null;
- const history=[`${a.name}: ${c.greeting}`,...c.messages.filter(m=>!fresh.has(m.id)&&m.role!=='system').slice(-12).map(m=>`${m.role==='user'?'Pessoa':a.name}: ${m.text}`)].join('\n\n');
- return[`# Conversa com ${a.name} · ${p.code} ${p.name}`,`## Projeto\n${clip(p.briefing,3000)||'(sem briefing)'}`,p.scopeIn?.trim()?`Dentro do escopo:\n${clip(p.scopeIn,1500)}`:'',p.scopeOut?.trim()?`Fora do escopo:\n${clip(p.scopeOut,1500)}`:'',`## Squad ${q?.name||''}\n${team}`,`## Features\n${feats||'(nenhuma ainda)'}`,
-  a.role==='architect'&&p.architecture?.trim()?`## Visão de arquitetura\n${clip(p.architecture,2500)}`:'',a.role==='architect'&&(p.adrs||[]).length?`## ADRs\n${p.adrs.map((x,i)=>`- ADR-${String(i+1).padStart(3,'0')}: ${x.title} (${x.status})`).join('\n')}`:'',
-  f?`## Feature em foco: ${f.key}, ${f.title}\n${STATUS[f.status]||f.status} · ${f.priority} · ${SCOPES[f.scope]||f.scope}\n\n### Escopo\n${clip(f.description,2500)||'(vazio)'}\n\n### Critérios de aceitação\n${clip(f.criteria,2000)||'(vazio)'}\n\n### Tarefas\n${clip(f.tasks,2000)||'(vazio)'}`:'',
-  adr?`## ADR em foco: ${adr.title} (${adr.status})\n${clip(adr.content,4000)||'(sem conteúdo)'}`:'',
-  `## Conversa até aqui\n${history}`,`## ${msgs.length>1?'Novas mensagens':'Nova mensagem'} da pessoa\n${msgs.map(m=>m.text).join('\n\n')}`,task?`## O que fazer agora\n${task}`:'',`## Como responder\nComo mensagem de celular, no seu jeito: curta (1 a 3 frases; se precisar citar vários pontos, poucas linhas curtas), sem travessões, sem elogiar a pergunta e sem oferecer mais ajuda no final.`].filter(Boolean).join('\n\n');
+ const feats=!p.features.length?'':(f?`Feature em foco ativa (${p.features.length} features no total).`:(p.features.slice(0,10).map(x=>`- ${x.key}: ${x.title} (${STATUS[x.status]||x.status}, ${x.priority})`).join('\n')+(p.features.length>10?`\n- ... e mais ${p.features.length-10} features.`:'')));
+ const history=compactChatHistory(c.greeting,c.messages,fresh,a.name);
+ return[`# Conversa com ${a.name} · ${p.code} ${p.name}`,
+  `## Projeto\n${clip(p.briefing,2000)||'(sem briefing)'}`,
+  p.scopeIn?.trim()?`Dentro do escopo:\n${clip(p.scopeIn,1200)}`:'',
+  p.scopeOut?.trim()?`Fora do escopo:\n${clip(p.scopeOut,1200)}`:'',
+  `## Squad ${q?.name||''}\n${team}`,
+  `## Features\n${feats||'(nenhuma ainda)'}`,
+  a.role==='architect'&&p.architecture?.trim()?`## Visão de arquitetura\n${clip(p.architecture,2000)}`:'',
+  a.role==='architect'&&(p.adrs||[]).length?`## ADRs\n${p.adrs.slice(0,8).map((x,i)=>`- ADR-${String(i+1).padStart(3,'0')}: ${x.title} (${x.status})`).join('\n')}`:'',
+  f?`## Feature em foco: ${f.key}, ${f.title}\n${STATUS[f.status]||f.status} · ${f.priority} · ${SCOPES[f.scope]||f.scope}\n\n### Escopo\n${clip(f.description,2000)||'(vazio)'}\n\n### Critérios de aceitação\n${clip(f.criteria,1500)||'(vazio)'}\n\n### Tarefas\n${clip(f.tasks,1500)||'(vazio)'}`:'',
+  adr?`## ADR em foco: ${adr.title} (${adr.status})\n${clip(adr.content,3000)||'(sem conteúdo)'}`:'',
+  history?`## Conversa até aqui\n${history}`:'',
+  `## ${msgs.length>1?'Novas mensagens':'Nova mensagem'} da pessoa\n${msgs.map(m=>m.text).join('\n\n')}`,
+  task?`## O que fazer agora\n${task}`:'',
+  `## Como responder\nComo mensagem de celular, no seu jeito: curta (1 a 3 frases; se precisar citar vários pontos, poucas linhas curtas), sem travessões, sem elogiar a pergunta e sem oferecer mais ajuda no final.`].filter(Boolean).join('\n\n');
 }
 // Free conversation: one turn per block of new messages (the ones sent meanwhile wait and go together), like runCoWrite.
 async function runAgentChat(msgs,task){
@@ -12374,15 +12400,21 @@ function deleteFeature(featureId){
  confirmAction('EXCLUIR FEATURE',`Excluir ${f.key} / ${f.title}? Essa ação remove o escopo e os registros de entrega desta feature.`,()=>{project().features=project().features.filter(x=>x.id!==f.id);log(`${f.key} excluida.`,'plan');if(ui.opsFeature===f.id){ui.opsFeature=null;ui.opsFeatureDraft=null;}save();render();},'Excluir feature',true);
 }
 // Sprints: name + goal; progress comes from their features. Moving a feature between sprints keeps route and status.
+function sprintReposSelectorHTML(p,selectedPaths=[]){
+ const repos=p?.repos||[];if(!repos.length)return'';
+ const selSet=new Set(selectedPaths),isAll=!selectedPaths.length;
+ return`<div class="field full" style="margin-top:14px"><label><span class="label-ico">📦</span>REPOSITÓRIOS EM FOCO NESTA SPRINT</label><span class="hint">Selecione quais microsserviços/projetos esta sprint irá desenvolver ou alterar. Desmarcado todos = todos ficam abertos. O GitNexus continuará indexando o ecossistema completo para consultas.</span><div class="check-grid" style="margin-top:8px">${repos.map(r=>{const checked=isAll?false:selSet.has(r.path),name=r.path.split(/[\\/]/).filter(Boolean).slice(-2).join('/')||r.path;return`<label class="check-card"><input type="checkbox" name="sprintRepos" value="${E(r.path)}" ${checked?'checked':''}><span><strong>${E(name)}</strong><small>${E((r.role||'repo').toUpperCase())} · ${E(r.path)}</small></span></label>`;}).join('')}</div></div>`;
+}
 function openSprintEditor(sprintId){
  if(!guardMutation())return;const p=project(),s=sprintById(sprintId,p);if(!s&&p.sprints.length>=50)return toast('Limite de 50 sprints por projeto.','error');
  const name=s?.name||'Sprint '+pad(p.sprints.length+1);
- showModal(s?'EDITAR <span class="word-tag">SPRINT</span>':'NOVA <span class="word-tag">SPRINT</span>',`${p.code} / ${s?sprintCode(s,p):'S'+pad(p.sprints.length+1)}`,`<form id="sprintForm" novalidate><input type="hidden" name="sprintId" value="${E(s?.id||'')}"><div class="field"><label for="sprintName">NOME</label><input id="sprintName" name="name" value="${E(name)}" maxlength="60" autocomplete="off" autofocus></div><div class="field"><label for="sprintGoal">OBJETIVO</label><textarea id="sprintGoal" name="goal" rows="4" maxlength="2000" placeholder="O que esta sprint entrega, em uma ou duas frases.">${E(s?.goal||'')}</textarea></div></form>`,`${cancelButton}<button class="btn primary" type="submit" form="sprintForm">${icon('check')}Salvar sprint</button>`,'narrow','sprint');
+ showModal(s?'EDITAR <span class="word-tag">SPRINT</span>':'NOVA <span class="word-tag">SPRINT</span>',`${p.code} / ${s?sprintCode(s,p):'S'+pad(p.sprints.length+1)}`,`<form id="sprintForm" novalidate><input type="hidden" name="sprintId" value="${E(s?.id||'')}"><div class="field"><label for="sprintName">NOME</label><input id="sprintName" name="name" value="${E(name)}" maxlength="60" autocomplete="off" autofocus></div><div class="field"><label for="sprintGoal">OBJETIVO</label><textarea id="sprintGoal" name="goal" rows="4" maxlength="2000" placeholder="O que esta sprint entrega, em uma ou duas frases.">${E(s?.goal||'')}</textarea></div>${sprintReposSelectorHTML(p,s?.repoPaths||[])}</form>`,`${cancelButton}<button class="btn primary" type="submit" form="sprintForm">${icon('check')}Salvar sprint</button>`,(p.repos||[]).length?'wide':'narrow','sprint');
 }
 function saveSprint(form){
  if(!guardMutation())return;const p=project(),d=new FormData(form),name=String(d.get('name')||'').trim().slice(0,60),goal=String(d.get('goal')||'').trim().slice(0,2000),s=sprintById(d.get('sprintId'),p);
+ const repoPaths=d.getAll('sprintRepos').map(x=>String(x).trim()).filter(Boolean);
  if(!name){$('#sprintName').focus();return toast('Informe o nome da sprint.','error');}
- if(s)Object.assign(s,{name,goal});else{if(p.sprints.length>=50)return toast('Limite de 50 sprints por projeto.','error');const n=createSprint(p.sprints.length+1,{name,goal});p.sprints.push(n);setSprintOpen(n.id,true);}
+ if(s)Object.assign(s,{name,goal,repoPaths});else{if(p.sprints.length>=50)return toast('Limite de 50 sprints por projeto.','error');const n=createSprint(p.sprints.length+1,{name,goal,repoPaths});p.sprints.push(n);setSprintOpen(n.id,true);}
  log(`${name}: sprint ${s?'atualizada':'criada'}.`,'plan');closeModal();save();render();toast(s?'Sprint atualizada.':'Sprint criada. Crie features nela ou arraste features de outra sprint.');
 }
 function deleteSprint(sprintId){
@@ -12492,13 +12524,14 @@ async function streamRun(runId,onEvent){
  return exit;
 }
 const splitList=v=>String(v||'').split(/[\n,]+/).map(s=>s.trim()).filter(Boolean);
-function runOptionsFor(a,r=runtime(),p=project()){
+function runOptionsFor(a,r=runtime(),p=project(),targetRepos=null){
  const engine=agentEngine(a,r);
  // The global model/effort override (runtime().model/.effort) is a Claude Code field (its datalist is CLAUDE_MODELS): it
  // only applies to agents actually running on that engine, never forced onto an Antigravity-engine agent's own model.
  const model=engine==='claude'?(r.model||(a.model&&a.model!=='inherit'?a.model:'')):(a.model&&a.model!=='inherit'?a.model:'');
  const allowed=[...a.tools,...splitList(r.extraAllowedTools)];
- return{engine,claudePath:r.claudePath,agyPath:r.agyPath,project:p?.folder||'',model,permissionMode:r.permissionMode,effort:agentEffort(a,r).effort,maxBudgetUsd:r.maxBudgetUsd,timeoutSec:r.timeoutSec,addDirs:p?.repos?.length?p.repos.map(x=>x.path):splitList(r.addDirs),allowedTools:[...new Set(allowed)],tools:r.restrictTools?a.tools.filter(t=>TOOLS.includes(t)):undefined,skills:[...(p?.skills||[])]};
+ const repos=targetRepos||p?.repos||[];
+ return{engine,claudePath:r.claudePath,agyPath:r.agyPath,project:p?.folder||'',model,permissionMode:r.permissionMode,effort:agentEffort(a,r).effort,maxBudgetUsd:r.maxBudgetUsd,timeoutSec:r.timeoutSec,addDirs:repos.length?repos.map(x=>x.path):splitList(r.addDirs),allowedTools:[...new Set(allowed)],tools:r.restrictTools?a.tools.filter(t=>TOOLS.includes(t)):undefined,skills:[...(p?.skills||[])]};
 }
 /* Command preview: mirrors the argument order built by server.js (startRun). */
 function claudeArgs(o,systemFile){
@@ -12582,7 +12615,7 @@ function buildStepPrompt(f,a,p){
  const retryNote=lastFail?`## A sua tentativa anterior desta etapa não terminou\nAntes de recomeçar, confira o que já está no repositório: é bem provável que parte do que você descreveu abaixo já esteja escrita nos arquivos. Não refaça o que já existe; só continue, corrija ou complete o que faltar.\n\n${clip(lastFail.text,4000)}`:'';
  return[
   `# Operação ${p.code}: ${p.name}`,
-  `## Briefing do projeto\n${p.briefing||'(sem briefing)'}`,...(p.repos?.length?[reposPromptBlock(p)]:[]),
+  `## Briefing do projeto\n${p.briefing||'(sem briefing)'}`,...(p.repos?.length?[reposPromptBlock(p,sprintRepos(sprintOf(f,p),p))]:[]),
   `## Sua atribuição\nVocê é ${a.name}, ${roleLabel(a)}. Etapa ${f.step+1} de ${f.route.length} da rota: ${route.map(x=>x?.name||'?').join(' > ')}.`,
   `## Feature ${f.key}: ${f.title}\nPrioridade: ${f.priority} / Área: ${SCOPES[f.scope]}${sp?` / Sprint: ${sp.name}${sp.goal?`\nObjetivo da sprint: ${sp.goal}`:''}`:''}\n\nEscopo:\n${f.description||'(não detalhado)'}\n\nCritérios de aceitação:\n${f.criteria}`,
   deps?`## Dependências já aprovadas\n${deps}`:'',
@@ -12645,7 +12678,7 @@ async function replayRun(runId){
 }
 async function executeLiveStep(f,a,p,owner){
  f.runStart??=f.outputs.length;
- const prompt=buildStepPrompt(f,a,p),{options,keys}=stepRunOptions(a,p),ctx=roomCtx(a,f,keys);
+ const prompt=buildStepPrompt(f,a,p),{options,keys}=stepRunOptions(a,p,runtime(),f),ctx=roomCtx(a,f,keys);
  let started;
  try{started=await bridgeFetch('/api/runs',{method:'POST',body:JSON.stringify({prompt,systemPrompt:agentSystemPrompt(a),label:`${a.name} / ${f.key}`,meta:runMeta(p,a,f,owner?.kind==='spawn'?'spawn':'step'),options})});}
  catch(error){return{error:error.message};}
@@ -12902,14 +12935,16 @@ function squadSubagents(a,p=project(),r=runtime()){
   if(o.tools)def.tools=o.tools;if(o.model)def.model=o.model;if(o.effort)def.effort=o.effort;defs[key]=def;keys[key]=m.id;}
  return{defs,keys};
 }
-function stepRunOptions(a,p=project(),r=runtime()){
- const o=runOptionsFor(a,r,p),{defs,keys}=squadSubagents(a,p,r);if(!Object.keys(defs).length)return{options:o,keys};
+function stepRunOptions(a,p=project(),r=runtime(),f=null){
+ const s=f?sprintOf(f,p):(runner?.sprintId?sprintById(runner.sprintId,p):currentSprint(p));
+ const targetRepos=sprintRepos(s,p);
+ const o=runOptionsFor(a,r,p,targetRepos),{defs,keys}=squadSubagents(a,p,r);if(!Object.keys(defs).length)return{options:o,keys};
  return{options:{...o,agents:defs,forwardSubagents:true,tools:o.tools?[...o.tools,'Agent']:undefined,allowedTools:[...new Set([...o.allowedTools,'Agent'])]},keys};
 }
 /* The commander plans the scope before anything runs: routes and one instruction per agent, approved by the person in the room. */
 function commanderPlanPrompt(p,owner,suggest){
  const clip=(t,n)=>{t=String(t||'').trim();return t.length>n?t.slice(0,n)+' [...]':t;},sp=sprintById(owner.sprintId,p);
- return[`# Operação ${p.code}: ${p.name}`,`## Briefing\n${clip(p.briefing,4000)}`,...(p.repos?.length?[reposPromptBlock(p)]:[]),
+ return[`# Operação ${p.code}: ${p.name}`,`## Briefing\n${clip(p.briefing,4000)}`,...(p.repos?.length?[reposPromptBlock(p,sprintRepos(sp,p))]:[]),
   `## O que vai ser executado\n${owner.kind==='feature'?`Só a feature ${suggest[0].f.key}.`:`${sp?.name||'Sprint'}${sp?.goal?`: ${sp.goal}`:''}`}`,
   `## Squad (codinome / papel / descrição)\n${squad().filter(a=>a.role!=='commander').map(a=>`- ${a.name} / ${roleLabel(a)} / ${clip(a.description,220)}`).join('\n')}`,
   `## Features para planejar\n${suggest.map(({f,route,missing})=>[`### ${f.key}: ${f.title}`,`Prioridade ${f.priority} / Área: ${SCOPES[f.scope]||f.scope} / Status: ${STATUS[f.status]}${f.dependencies.length?` / Dependências: ${f.dependencies.map(id=>p.features.find(x=>x.id===id)).filter(Boolean).map(d=>`${d.key} (${STATUS[d.status]})`).join(', ')}`:''}`,f.description?`Escopo: ${clip(f.description,900)}`:'',`Critérios: ${clip(f.criteria,700)}`,f.context?`Contexto de handoff: ${clip(f.context,600)}`:'',`Rota sugerida: ${route.length?route.map(id=>agentById(id)?.name).join(' > '):'nenhuma'}${missing.length?` (faltam na squad: ${missing.join(', ')})`:''}`].filter(Boolean).join('\n')).join('\n\n')}`,
@@ -13351,7 +13386,7 @@ function renderOpsFeatures(p){
   if(view==='board')return`<div class="kanban ops-kanban">${kanbanHTML()}</div>`;
   const row=(f,i=0)=>{const blocked=f.status==='blocked'||(f.status==='ready'&&!depsReady(f,p)),resuming=f.status==='ready'&&f.currentAgentId&&f.route.includes(f.currentAgentId),runTitle=f.status==='backlog'?'Executar esta feature (mostra o plano de distribuição antes)':blocked?blockedWhy(f,p):resuming?`Retomar de ${agentById(f.currentAgentId)?.name||'?'} (etapa ${f.step+1}/${f.route.length}), sem replanejar`:'Executar só esta feature';return`<div class="sprint-node st-${f.status}" style="--i:${i}"><div class="ops-feature ${ui.opsFeature===f.id?'selected':''}"${runner||f.setup?'':` draggable="true" data-feature="${E(f.id)}"`}><span class="ops-key">${E(f.key)}</span><button class="grow ops-feature-open" data-action="feature-open" data-id="${E(f.id)}"><strong>${E(f.title)}</strong><small>${E(SCOPES[f.scope]||f.scope)}${f.dependencies.length?` · ${f.dependencies.length} dependência(s)`:''}</small></button><span class="tag">${E(f.priority)}</span><span class="ops-status s-${f.status}">${E(STATUS[f.status].toUpperCase())}</span><div class="mini-faces">${f.route.map(agentById).filter(Boolean).slice(0,6).map(a=>`<img src="${portrait(a)}" alt="${E(a.name)}" title="${E(a.name)}">`).join('')||'<small class="muted">SEM ROTA</small>'}</div>${['backlog','ready','blocked'].includes(f.status)?`<button class="icon-button small ops-run ${blocked?'is-blocked':''}" data-action="feature-run" data-id="${E(f.id)}" aria-label="Executar ${E(f.key)}" title="${E(runTitle)}" ${runner?'disabled':''}>${icon(blocked?'lock':'play')}</button><button class="icon-button small" data-action="feature-force-done" data-id="${E(f.id)}" aria-label="Marcar ${E(f.key)} como concluída" title="Marcar como concluída manualmente (pula a squad e a revisão)" ${runner?'disabled':''}>${icon('check')}</button>`:''}${f.status==='done'&&!f.setup?`<button class="icon-button small" data-action="feature-reopen" data-id="${E(f.id)}" aria-label="Reabrir ${E(f.key)}" title="Voltar para Pronta e executar de novo" ${runner?'disabled':''}>${icon('back')}</button>`:''}<button class="icon-button small" data-action="feature-open" data-id="${E(f.id)}" aria-label="Abrir ${E(f.key)}" title="${['done','review','running'].includes(f.status)?'Ver entrega / revisar':'Editar / detalhar'}">${icon(['done','review','running'].includes(f.status)?'eye':'edit')}</button>${f.setup?'':`<button class="icon-button small" data-action="feature-delete" data-id="${E(f.id)}" aria-label="Excluir ${E(f.key)}" title="Excluir" ${runner?'disabled':''}>${icon('trash')}</button>`}</div></div>`;};
   const sprintHTML=s=>{const fs=sprintFeatures(s,p),shown=fs.filter(match);if(q&&!shown.length)return'';const done=fs.filter(f=>f.status==='done').length,review=fs.filter(f=>f.status==='review').length,complete=!!fs.length&&done===fs.length,isOpen=!!q||!!ui.sprintOpen[s.id],drawing=isOpen&&!q&&ui.sprintDraw===s.id,running=!!runner&&runner.sprintId===s.id,pct=fs.length?Math.round(done/fs.length*100):0;
-   return`<section class="sprint${isOpen?'':' collapsed'}${drawing?' drawing':''}${running?' running':''}${complete?' complete':''}" data-sprint="${E(s.id)}"><header class="sprint-head"><button class="sprint-toggle" data-action="sprint-toggle" data-id="${E(s.id)}" aria-expanded="${isOpen}">${sprintCubeSVG()}<span class="fe-chev"></span><span class="sprint-code">${sprintCode(s,p)}</span><span class="sprint-title"><strong>${E(s.name)}</strong>${s.goal?`<small>${E(s.goal)}</small>`:''}</span></button>`+
+   return`<section class="sprint${isOpen?'':' collapsed'}${drawing?' drawing':''}${running?' running':''}${complete?' complete':''}" data-sprint="${E(s.id)}"><header class="sprint-head"><button class="sprint-toggle" data-action="sprint-toggle" data-id="${E(s.id)}" aria-expanded="${isOpen}">${sprintCubeSVG()}<span class="fe-chev"></span><span class="sprint-code">${sprintCode(s,p)}</span><span class="sprint-title"><strong>${E(s.name)}</strong>${s.goal?`<small>${E(s.goal)}</small>`:''}${s.repoPaths?.length?`<span class="tag sm" style="margin-left:6px;font-size:10px" title="Repositórios em foco">${s.repoPaths.length} repo${s.repoPaths.length>1?'s':''}</span>`:''}</span></button>`+
     `<span class="sprint-meta">${running?`<span class="tag accent">${runner.paused?'PAUSADA':'EM EXECUÇÃO'}</span>`:s===cur&&!complete&&!runner?'<span class="tag accent">ATUAL</span>':''}${review?`<span class="tag">${pad(review)} EM REVISÃO</span>`:''}<span class="sprint-count" title="Concluídas / total">${pad(done)}/${pad(fs.length)}</span><i class="ops-progress"><b style="width:${pct}%"></b></i></span>`+
     `<span class="sprint-actions">${running?`<button class="btn sm" data-action="run">${icon(runControl().icon)}${runControl().label}</button>`:`<button class="btn sm ${s===cur&&!runner?'primary':''}" data-action="sprint-run" data-id="${E(s.id)}" ${runner||!fs.length||complete?'disabled':''} title="${complete?'Sprint concluída':!fs.length?'Sprint sem features':`Executar as features de ${E(s.name)}`}">${icon('play')}Executar sprint</button>`}<button class="icon-button small" data-action="feature-new" data-sprint="${E(s.id)}" aria-label="Nova feature em ${E(s.name)}" title="Nova feature nesta sprint" ${runner?'disabled':''}>${icon('plus')}</button><button class="icon-button small" data-action="sprint-edit" data-id="${E(s.id)}" aria-label="Editar ${E(s.name)}" title="Editar sprint" ${runner?'disabled':''}>${icon('edit')}</button><button class="icon-button small" data-action="sprint-delete" data-id="${E(s.id)}" aria-label="Excluir ${E(s.name)}" title="${p.sprints.length<2?'Toda operação precisa de pelo menos uma sprint':'Excluir sprint (só vazia)'}" ${runner||p.sprints.length<2?'disabled':''}>${icon('trash')}</button></span></header>`+
     `<div class="sprint-body" style="--n:${shown.length}">${shown.map(row).join('')||`<div class="sprint-empty">${runner?'Nenhuma feature nesta sprint.':'Arraste features para cá ou crie uma nova com o botão +.'}</div>`}</div></section>`;};
