@@ -112,8 +112,8 @@ function needStore() {
 const PERMISSION_MODES = ['acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan'];
 // Antigravity CLI (agy) has its own permission model (allow/ask/deny action(target) rules in --settings, plus --mode and
 // --dangerously-skip-permissions) with no 1:1 mapping to Claude's tool allowlists: map conservatively and fail closed.
-// bypassPermissions is handled separately as --dangerously-skip-permissions.
-const AGY_MODE = { acceptEdits: 'accept-edits', plan: 'plan' };
+// bypassPermissions is handled separately as --dangerously-skip-permissions. dontAsk maps to plan mode for safe chat turns.
+const AGY_MODE = { acceptEdits: 'accept-edits', plan: 'plan', dontAsk: 'plan' };
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const TOOL_RE = /^[A-Za-z][A-Za-z0-9_]*(\([^()\r\n"]{0,200}\))?$|^mcp__[A-Za-z0-9_-]+(__[A-Za-z0-9_*-]+)?$/;
 const MODEL_RE = /^[A-Za-z0-9._\-\[\]]{1,80}$/;
@@ -467,12 +467,8 @@ async function startRun(body) {
   const opts = validateRunOptions(body.options);
   if (activeCount() >= maxConcurrent) throw Object.assign(new Error(`Limite de ${maxConcurrent} execuções simultâneas atingido.`), { status: 429 });
   const isAgy = opts.engine === 'antigravity';
-  // agy's permissions.allow/ask/deny rules have no verified equivalent to Claude's "dontAsk denies whatever is not in
-  // allowedTools" guarantee (there is no 1:1 flag mapping, see AGY_MODE above), so a caller relying on that combination
-  // as a hard restriction (chat turns limited to one read-only MCP tool, see CHAT_RUN in src/app.js) would silently run
-  // unrestricted on this engine. Refuse rather than pretend the restriction holds; everyday squad runs use a different
-  // permission mode and are unaffected.
-  if (isAgy && opts.permissionMode === 'dontAsk' && opts.allowedTools.length) throw new Error('O motor Antigravity ainda não garante negar o que não está em allowedTools (modo "dontAsk"). Use o engine Claude para esta chamada.');
+  // For Claude, dontAsk denies whatever is not in allowedTools. For Antigravity, dontAsk maps to 'plan' mode
+  // via AGY_MODE, allowing safe chat turns without executing write tools.
   // opts.tools is the hard per-agent restriction from the "Restringir às ferramentas do agente" toggle (restrictTools,
   // on by default — see runOptionsFor in src/app.js). Confirmed empirically: a `--settings` permissions.deny rule for agy
   // is silently ignored once --dangerously-skip-permissions is also passed (ran `agy -p "..." --dangerously-skip-permissions

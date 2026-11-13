@@ -2161,7 +2161,7 @@ function claudeArgs(o,systemFile){
 // equivalent yet), and the prompt/instructions go as the literal value of -p (agy has no stdin-prompt support at all).
 // AGY_MODE mirrors server.js's AGY_MODE: only bypassPermissions maps to --dangerously-skip-permissions, acceptEdits/plan
 // map to --mode, everything else fails closed to agy's own default (headless denies unapproved actions).
-const AGY_MODE={acceptEdits:'accept-edits',plan:'plan'};
+const AGY_MODE={acceptEdits:'accept-edits',plan:'plan',dontAsk:'plan'};
 function agyArgs(o){
  const args=[['-p','<prompt+instruções>'],['--output-format','stream-json']];
  if(o.model)args.push(['--model',o.model]);
