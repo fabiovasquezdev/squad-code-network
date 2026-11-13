@@ -45,6 +45,29 @@ const ROOT = __dirname;
 // empirically (a PostToolUse hook on write_file in both locations never ran), matching open upstream issues about its
 // hooks.json schema. Revisit once that is fixed upstream.
 const DEBUG_HOOK_SCRIPT = path.join(ROOT, 'scripts', 'hooks', 'check-debug-leftovers.py');
+// Skills (project-scoped, not per-agent): confirmed against Claude Code's own docs/open issues that there is no
+// per-run/per-agent skill directory override yet (skillsDirectories/additionalSkillDirs are still open feature
+// requests), only the fixed ~/.claude/skills and <cwd>/.claude/skills locations — so a project's chosen skills go into
+// the project folder (the run's cwd either way) and whichever agent's own role prompt makes a skill relevant is the one
+// that actually invokes it; there is no filesystem-level agent boundary for this, by design given the upstream gap.
+const SKILLS_TEMPLATES_DIR = path.join(ROOT, 'skills-templates');
+function skillCatalog() {
+  try { return fs.readdirSync(SKILLS_TEMPLATES_DIR, { withFileTypes: true }).filter(d => d.isDirectory() && fs.existsSync(path.join(SKILLS_TEMPLATES_DIR, d.name, 'SKILL.md'))).map(d => d.name); }
+  catch { return []; }
+}
+/** Makes <cwd>/.claude/skills match exactly the requested catalog ids — adds missing ones, removes ones no longer
+ *  selected. This folder is fully bridge-managed (same spirit as the per-run --settings file): don't hand-edit it in a
+ *  project repo, change the selection from the app instead. */
+async function syncProjectSkills(cwd, ids) {
+  const known = new Set(skillCatalog());
+  const want = [...new Set((Array.isArray(ids) ? ids : []).filter(id => /^[a-z0-9-]+$/.test(id) && known.has(id)))];
+  const skillsDir = path.join(cwd, '.claude', 'skills');
+  let existing = [];
+  try { existing = await fsp.readdir(skillsDir); } catch {}
+  await fsp.mkdir(skillsDir, { recursive: true });
+  await Promise.all(existing.filter(name => !want.includes(name)).map(name => fsp.rm(path.join(skillsDir, name), { recursive: true, force: true })));
+  await Promise.all(want.map(id => fsp.cp(path.join(SKILLS_TEMPLATES_DIR, id), path.join(skillsDir, id), { recursive: true, force: true })));
+}
 const argPort = process.argv.indexOf('--port');
 const PORT = Number(argPort > -1 ? process.argv[argPort + 1] : process.env.SQUAD_PORT) || 4317;
 const HOST = '127.0.0.1';
@@ -349,6 +372,7 @@ function validateRunOptions(o = {}) {
   // Optional hard restriction of the built-in tool set (maps to --tools). null = Claude Code defaults.
   out.tools = Array.isArray(o.tools) ? tools(o.tools) : null;
   if (out.tools) for (const t of out.tools) if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(t)) throw new Error(`Ferramenta inválida: ${t}`);
+  out.skills = (Array.isArray(o.skills) ? o.skills : []).map(String).map(s => s.trim()).filter(Boolean).slice(0, 20);
   out.addDirs = (Array.isArray(o.addDirs) ? o.addDirs : []).map(String).map(s => s.trim()).filter(Boolean).slice(0, 20).map(d => path.resolve(d));
   out.addDirs = out.addDirs.map(d => fs.existsSync(d) ? longPath(d) : d);
   for (const d of out.addDirs) if (!fs.existsSync(d)) throw new Error(`Diretório adicional inexistente: ${d}`);
@@ -504,6 +528,10 @@ async function startRun(body) {
         hooks: { PostToolUse: [{ matcher: 'Write|Edit', hooks: [{ type: 'command', command: `python3 "${DEBUG_HOOK_SCRIPT}"` }] }] },
       }), 'utf8');
       args.push('--settings', settingsFile);
+      // Claude Code has no per-run/per-agent skill-directory override (confirmed via upstream issues #22902/#39403/
+      // #84014, all open feature requests), so skills can only be isolated per project folder: mirror the selected
+      // catalog ids into .claude/skills before the run and remove anything no longer selected.
+      await syncProjectSkills(opts.cwd, opts.skills);
     }
     if (opts.agents) {
       agentsFile = path.join(TMP_DIR, `${id}.agents.json`);
@@ -691,7 +719,7 @@ async function handle(req, res) {
       const bin = url.searchParams.get('claudePath') || DEFAULT_BIN;
       const agyBin = url.searchParams.get('agyPath') || DEFAULT_AGY_BIN;
       const [info, agyInfo] = await Promise.all([claudeVersion(bin), claudeVersion(agyBin)]);
-      return json(res, 200, { ok: true, bridge: 'squad-code', claudeVersion: info.version, claudePath: info.resolved, claudeError: info.error, agyVersion: agyInfo.version, agyPath: agyInfo.resolved, agyError: agyInfo.error, defaultCwd: process.cwd(), projectsDir: longPath(PROJECTS_DIR), home: HOME, platform: process.platform, activeRuns: activeCount(), maxConcurrent, dbReady: !setupNeeded(), dbPath: store?.file || DB_FILE });
+      return json(res, 200, { ok: true, bridge: 'squad-code', claudeVersion: info.version, claudePath: info.resolved, claudeError: info.error, agyVersion: agyInfo.version, agyPath: agyInfo.resolved, agyError: agyInfo.error, defaultCwd: process.cwd(), projectsDir: longPath(PROJECTS_DIR), home: HOME, platform: process.platform, activeRuns: activeCount(), maxConcurrent, dbReady: !setupNeeded(), dbPath: store?.file || DB_FILE, skills: skillCatalog(), stitchEnabled: !!process.env.STITCH_API_KEY });
     }
     // First start: the page creates the database with the workspace the person chose (from scratch, the example, a backup or the
     // browser's copy). Validated before anything is written; refused once a workspace exists.

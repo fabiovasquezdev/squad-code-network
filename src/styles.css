@@ -64,6 +64,8 @@ button.mode-indicator:hover,button.mode-indicator:focus-visible{border-color:#ff
 .mode-indicator.live i{background:#41d67f;box-shadow:0 0 8px #41d67f99}
 .demo-note.live{color:#7fcf9d}
 .check-card.full{grid-column:1/-1}
+.check-card.off{cursor:default;opacity:.55}
+.check-card.off .icon{color:#6b7c84}
 .notice code,.hint code{font:10px var(--mono);color:var(--cyan)}
 .console-meta{display:flex;flex-wrap:wrap;align-items:center;gap:14px;font:9px var(--mono);letter-spacing:.8px;color:var(--muted);margin-bottom:12px}
 .console-lines{height:min(56vh,560px);overflow:auto;background:#030405;border:1px solid #ffffff14;padding:10px 12px;font:11px/1.55 var(--mono)}
