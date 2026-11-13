@@ -2182,7 +2182,12 @@ function commandPreviewHTML(){
 function buildStepPrompt(f,a,p){
  const route=f.route.map(id=>agentById(id)),next=route[f.step+1],clip=(t,n)=>t.length>n?t.slice(0,n)+'\n[...]':t,sp=sprintOf(f,p);
  const brief=f.briefs?.length===f.route.length?f.briefs[f.step]:'',mates=Object.entries(squadSubagents(a,p).keys).map(([key,id])=>{const m=agentById(id);return`- ${key}: ${m.name}, ${roleLabel(m)}`;});
- const deps=f.dependencies.map(id=>p.features.find(x=>x.id===id)).filter(Boolean).map(d=>{const last=[...d.outputs].reverse().find(o=>!o.error);return`- ${d.key} / ${d.title}${last?`\n  Entrega aprovada (${agentById(last.agentId)?.name||'agente'}):\n  ${clip(last.text,2000).replace(/\n/g,'\n  ')}`:''}`;}).join('\n');
+ // F00 (setup) is a dependency of every feature in the project by construction (ensureSetup), so its handoff — usually
+ // "stack confirmed, structure is X", not feature-specific business logic — would otherwise repeat at full length in
+ // every single feature's prompt for the life of the project. A genuine feature-to-feature dependency is more likely to
+ // carry a specific detail (a field, an endpoint shape) the dependent feature actually needs verbatim, so only setup's
+ // entry shrinks.
+ const deps=f.dependencies.map(id=>p.features.find(x=>x.id===id)).filter(Boolean).map(d=>{const last=[...d.outputs].reverse().find(o=>!o.error);return`- ${d.key} / ${d.title}${last?`\n  Entrega aprovada (${agentById(last.agentId)?.name||'agente'}):\n  ${clip(last.text,d.setup?600:2000).replace(/\n/g,'\n  ')}`:''}`;}).join('\n');
  // Tiered, not uniform: the immediately preceding handoff is what this agent most needs to act on, so it keeps the full
  // 6000-char budget; each step further back is progressively less likely to still be relevant to the work ahead, so it
  // shrinks instead of costing the same tokens as the handoff that actually matters right now. A 5-step route's last
