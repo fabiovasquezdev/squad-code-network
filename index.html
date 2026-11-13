@@ -12540,7 +12540,12 @@ function buildStepPrompt(f,a,p){
  const route=f.route.map(id=>agentById(id)),next=route[f.step+1],clip=(t,n)=>t.length>n?t.slice(0,n)+'\n[...]':t,sp=sprintOf(f,p);
  const brief=f.briefs?.length===f.route.length?f.briefs[f.step]:'',mates=Object.entries(squadSubagents(a,p).keys).map(([key,id])=>{const m=agentById(id);return`- ${key}: ${m.name}, ${roleLabel(m)}`;});
  const deps=f.dependencies.map(id=>p.features.find(x=>x.id===id)).filter(Boolean).map(d=>{const last=[...d.outputs].reverse().find(o=>!o.error);return`- ${d.key} / ${d.title}${last?`\n  Entrega aprovada (${agentById(last.agentId)?.name||'agente'}):\n  ${clip(last.text,2000).replace(/\n/g,'\n  ')}`:''}`;}).join('\n');
- const previous=f.outputs.slice(f.runStart??f.outputs.length).filter(o=>!o.error).slice(-4).map(o=>`### ${agentById(o.agentId)?.name||'Agente'} (${agentById(o.agentId)?roleLabel(agentById(o.agentId)):''})\n${clip(o.text,6000)}`).join('\n\n');
+ // Tiered, not uniform: the immediately preceding handoff is what this agent most needs to act on, so it keeps the full
+ // 6000-char budget; each step further back is progressively less likely to still be relevant to the work ahead, so it
+ // shrinks instead of costing the same tokens as the handoff that actually matters right now. A 5-step route's last
+ // step used to pay for 4×6000 chars of equally "full" history; the oldest of those is now a fraction of that size.
+ const priorOutputs=f.outputs.slice(f.runStart??f.outputs.length).filter(o=>!o.error).slice(-4);
+ const previous=priorOutputs.map((o,i)=>{const limit=[6000,2500,1200,1200][priorOutputs.length-1-i]??1200;return`### ${agentById(o.agentId)?.name||'Agente'} (${agentById(o.agentId)?roleLabel(agentById(o.agentId)):''})\n${clip(o.text,limit)}`;}).join('\n\n');
  // A retry resumes the same agent at the same step (launchNext/resumeFeature never move currentAgentId back), but
  // "previous" above drops error outputs on purpose, so a step that failed mid-way (timeout, network error) used to hand
  // the retry zero memory of its own last attempt — it had to rediscover everything from the repo alone, which eats into
